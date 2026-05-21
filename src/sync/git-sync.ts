@@ -1,0 +1,386 @@
+import * as git from "isomorphic-git";
+import { requestUrl, DataAdapter } from "obsidian";
+import { createFsAdapter } from "./fs-adapter";
+import {
+  GIT_AUTHOR_NAME,
+  GIT_AUTHOR_EMAIL,
+  DEFAULT_BRANCH,
+} from "../constants";
+import { ConflictFile, SyncResult } from "../types";
+
+// Custom HTTP client that uses Obsidian's requestUrl (mobile-safe, bypasses CORS)
+const gitHttp = {
+  async request({ url, method, headers, body }: {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    body?: AsyncIterableIterator<Uint8Array>;
+  }) {
+    let bodyBuffer: ArrayBuffer | undefined;
+    if (body) {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of body) chunks.push(chunk);
+      const total = chunks.reduce((n, c) => n + c.length, 0);
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+      bodyBuffer = merged.buffer;
+    }
+
+    const response = await requestUrl({
+      url,
+      method,
+      headers,
+      body: bodyBuffer,
+      throw: false,
+    });
+
+    const arrayBuffer = response.arrayBuffer;
+    async function* responseBody() {
+      yield new Uint8Array(arrayBuffer);
+    }
+
+    return {
+      url,
+      method,
+      statusCode: response.status,
+      statusMessage: "OK",
+      body: responseBody(),
+      headers: response.headers as Record<string, string>,
+    };
+  },
+};
+
+export class GitSync {
+  private fs: ReturnType<typeof createFsAdapter>;
+  private dir: string;
+  private token: string;
+  private username: string;
+  private remoteUrl: string;
+
+  constructor(
+    adapter: DataAdapter,
+    vaultPath: string,
+    token: string,
+    username: string,
+    repoName: string
+  ) {
+    this.fs = createFsAdapter(adapter, vaultPath);
+    this.dir = vaultPath;
+    this.token = token;
+    this.username = username;
+    this.remoteUrl = `https://github.com/${username}/${repoName}.git`;
+  }
+
+  /** Base options shared by ALL git operations (local and network) */
+  private gitOpts() {
+    return {
+      fs: this.fs,
+      http: gitHttp,
+      dir: this.dir,
+      author: { name: GIT_AUTHOR_NAME, email: GIT_AUTHOR_EMAIL },
+    };
+  }
+
+  /**
+   * Extra options for NETWORK operations (push / fetch / clone).
+   *
+   * isomorphic-git strips credentials from remote URLs before sending requests.
+   * We must supply them via `onAuth` so every push/fetch is authenticated.
+   * We also pass `url` directly so the library does not have to read `.git/config`.
+   */
+  private netOpts() {
+    const token = this.token;
+    const username = this.username;
+    return {
+      ...this.gitOpts(),
+      url: this.remoteUrl,
+      onAuth: () => ({ username, password: token }),
+      onAuthFailure: () => {
+        throw new Error("GitHub authentication failed. Please reconnect your account in MultiSync settings.");
+      },
+    };
+  }
+
+  /** Returns true if .git exists and HEAD resolves (repo is initialised) */
+  async isInitialized(): Promise<boolean> {
+    try {
+      await git.resolveRef({ fs: this.fs, dir: this.dir, ref: "HEAD" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Returns true if refs/heads/main exists (at least one commit has been made).
+   * Returns false on a fresh git.init with no commits (unborn branch).
+   */
+  async hasLocalBranch(): Promise<boolean> {
+    try {
+      await git.resolveRef({ fs: this.fs, dir: this.dir, ref: DEFAULT_BRANCH });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fetch from origin. Returns the FETCH_HEAD oid when remote has commits,
+   * or null when the remote is empty or unreachable.
+   */
+  private async safeFetch(): Promise<string | null> {
+    try {
+      await git.fetch({
+        ...this.netOpts(),
+        ref: DEFAULT_BRANCH,
+        singleBranch: true,
+      });
+      return await git.resolveRef({ fs: this.fs, dir: this.dir, ref: "FETCH_HEAD" });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Clone the remote into the vault directory.
+   * Returns true if the clone produced a usable local branch (non-empty remote).
+   */
+  async clone(): Promise<boolean> {
+    await git.clone({
+      ...this.netOpts(),
+      singleBranch: true,
+      depth: 1,
+    });
+    return this.hasLocalBranch();
+  }
+
+  /**
+   * First-time setup: init locally (if needed), commit everything, push.
+   * Safe to call on a partially-initialised repo (retry after failure).
+   */
+  async initAndPush(vaultFiles: string[]): Promise<void> {
+    const alreadyInited = await this.isInitialized();
+    if (!alreadyInited) {
+      await git.init({ fs: this.fs, dir: this.dir, defaultBranch: DEFAULT_BRANCH });
+    }
+
+    // Stage all vault files (skip any that fail)
+    for (const file of vaultFiles) {
+      try {
+        await git.add({ fs: this.fs, dir: this.dir, filepath: file });
+      } catch {
+        // Skip un-stageable files (binary, permission issues, etc.)
+      }
+    }
+
+    const localBranchExists = await this.hasLocalBranch();
+    if (!localBranchExists) {
+      // First-ever commit — create it unconditionally so refs/heads/main is written
+      // even when the vault is empty.
+      await git.commit({
+        ...this.gitOpts(),
+        message: "sync: initial vault snapshot",
+      });
+    } else {
+      // Subsequent call (retry) — only commit if something changed
+      const status = await git.statusMatrix({ fs: this.fs, dir: this.dir });
+      const dirty = status.some(([, h, w, s]) => h !== 1 || w !== 1 || s !== 1);
+      if (dirty) {
+        await git.commit({
+          ...this.gitOpts(),
+          message: "sync: initial vault snapshot",
+        });
+      }
+    }
+
+    // Set up remote (delete+re-add to ensure correct fetch refspec)
+    try {
+      await git.deleteRemote({ fs: this.fs, dir: this.dir, remote: "origin" });
+    } catch { /* didn't exist yet */ }
+    await git.addRemote({
+      fs: this.fs,
+      dir: this.dir,
+      remote: "origin",
+      url: this.remoteUrl,
+    });
+
+    await git.push({
+      ...this.netOpts(),
+      ref: DEFAULT_BRANCH,
+      force: false,
+    });
+  }
+
+  /**
+   * Full sync cycle — runs on every file change and manual sync trigger.
+   *
+   * Steps (each individually guarded to prevent one failure cascading):
+   *   1. Stage all changed files
+   *   2. Commit if dirty  (creates refs/heads/main on first run)
+   *   3. Fetch from remote
+   *   4. Merge FETCH_HEAD into local branch  (skipped if remote is empty)
+   *   5. Detect conflicts
+   *   6. Push  (skipped if conflicts or no local branch yet)
+   */
+  async sync(changedFiles: string[]): Promise<SyncResult> {
+    const conflicts: ConflictFile[] = [];
+
+    try {
+      // ── 1. Stage ─────────────────────────────────────────────────────────────
+      for (const file of changedFiles) {
+        try {
+          await git.add({ fs: this.fs, dir: this.dir, filepath: file });
+        } catch {
+          try {
+            await git.remove({ fs: this.fs, dir: this.dir, filepath: file });
+          } catch { /* skip */ }
+        }
+      }
+
+      // ── 2. Commit if dirty ───────────────────────────────────────────────────
+      // Wrap statusMatrix: some isomorphic-git versions throw on an unborn branch.
+      let hasDirty: boolean;
+      try {
+        const matrix = await git.statusMatrix({ fs: this.fs, dir: this.dir });
+        hasDirty = matrix.some(([, h, w, s]) => h !== 1 || w !== 1 || s !== 1);
+      } catch {
+        // Fall back: assume dirty when files were changed
+        hasDirty = changedFiles.length > 0;
+      }
+
+      if (hasDirty) {
+        const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+        await git.commit({
+          ...this.gitOpts(),
+          message: `sync: ${now}`,
+        });
+        // refs/heads/main is now guaranteed to exist
+      }
+
+      // ── 3. Fetch ─────────────────────────────────────────────────────────────
+      const fetchHead = await this.safeFetch();
+
+      // ── 4. Merge ─────────────────────────────────────────────────────────────
+      if (fetchHead && (await this.hasLocalBranch())) {
+        const localHead = await git.resolveRef({
+          fs: this.fs,
+          dir: this.dir,
+          ref: DEFAULT_BRANCH,
+        });
+
+        if (fetchHead !== localHead) {
+          await git.merge({
+            fs: this.fs,
+            dir: this.dir,
+            ours: DEFAULT_BRANCH,
+            theirs: fetchHead,
+            author: { name: GIT_AUTHOR_NAME, email: GIT_AUTHOR_EMAIL },
+            message: "sync: merge remote changes",
+            fastForwardOnly: false,
+          });
+        }
+      }
+
+      // ── 5. Detect conflicts ──────────────────────────────────────────────────
+      if (await this.hasLocalBranch()) {
+        const statusAfter = await git.statusMatrix({ fs: this.fs, dir: this.dir });
+        for (const [filepath, head, workdir, stage] of statusAfter) {
+          if (stage === 2 || (head === 0 && workdir === 2 && stage === 0)) {
+            const ours   = await this.readFileContent(filepath);
+            const theirs = await this.readRemoteFileContent(filepath);
+            conflicts.push({ path: filepath, ours, theirs });
+          }
+        }
+      }
+
+      // ── 6. Push ──────────────────────────────────────────────────────────────
+      if (conflicts.length === 0 && (await this.hasLocalBranch())) {
+        await git.push({
+          ...this.netOpts(),
+          ref: DEFAULT_BRANCH,
+        });
+      }
+
+      return { success: conflicts.length === 0, conflictFiles: conflicts };
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { success: false, conflictFiles: [], error: msg };
+    }
+  }
+
+  /** Resolve a conflict by writing resolved content, committing, and pushing */
+  async resolveConflict(filepath: string, resolvedContent: string): Promise<void> {
+    const fullPath = `${this.dir}/${filepath}`;
+    await this.fs.promises.writeFile(fullPath, resolvedContent);
+    await git.add({ fs: this.fs, dir: this.dir, filepath });
+    await git.commit({
+      ...this.gitOpts(),
+      message: `sync: resolve conflict in ${filepath}`,
+    });
+    await git.push({
+      ...this.netOpts(),
+      ref: DEFAULT_BRANCH,
+    });
+  }
+
+  /**
+   * Pull-only — used on vault open to get latest without pushing.
+   * Uses explicit fetch + merge (not git.pull) for consistent error handling.
+   */
+  async pull(): Promise<void> {
+    if (!(await this.hasLocalBranch())) return;
+
+    const fetchHead = await this.safeFetch();
+    if (!fetchHead) return;
+
+    const localHead = await git.resolveRef({
+      fs: this.fs,
+      dir: this.dir,
+      ref: DEFAULT_BRANCH,
+    });
+
+    if (fetchHead !== localHead) {
+      await git.merge({
+        fs: this.fs,
+        dir: this.dir,
+        ours: DEFAULT_BRANCH,
+        theirs: fetchHead,
+        author: { name: GIT_AUTHOR_NAME, email: GIT_AUTHOR_EMAIL },
+        message: "sync: merge remote changes",
+        fastForwardOnly: false,
+      });
+    }
+  }
+
+  private async readFileContent(filepath: string): Promise<string> {
+    try {
+      const buf = await this.fs.promises.readFile(
+        `${this.dir}/${filepath}`,
+        { encoding: "utf8" }
+      );
+      return buf as string;
+    } catch {
+      return "";
+    }
+  }
+
+  private async readRemoteFileContent(filepath: string): Promise<string> {
+    try {
+      const remoteCommit = await git.resolveRef({
+        fs: this.fs,
+        dir: this.dir,
+        ref: `refs/remotes/origin/${DEFAULT_BRANCH}`,
+      });
+      const { blob } = await git.readBlob({
+        fs: this.fs,
+        dir: this.dir,
+        oid: remoteCommit,
+        filepath,
+      });
+      return new TextDecoder().decode(blob);
+    } catch {
+      return "";
+    }
+  }
+}
