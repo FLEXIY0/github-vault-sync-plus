@@ -1,6 +1,6 @@
 {
-  "id": "github-vault-sync",
-  "name": "GitHub Vault Sync",
+  "id": "github-sync",
+  "name": "GitHub Sync",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
   "description": "Sync your vault across all devices using your own GitHub account. Free forever.",
