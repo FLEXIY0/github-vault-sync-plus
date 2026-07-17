@@ -16,8 +16,10 @@ export default class MultiSyncPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
 
-    this.statusBar = new StatusBarItem(this);
+    this.statusBar = new StatusBarItem(this, () => this.settings.lastSyncTime);
     this.statusBar.onClick(() => this.triggerManualSync());
+    // Keep the "time since last sync" label fresh while idle
+    this.registerInterval(window.setInterval(() => this.statusBar.refresh(), 30_000));
 
     this.addSettingTab(new MultiSyncSettingsTab(this.app, this));
 

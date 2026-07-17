@@ -10,7 +10,7 @@ import { DeviceFlowResponse } from "../types";
  * Step 1: Request a device code from GitHub.
  * Returns the user_code to display and the device_code to poll with.
  */
-export async function requestDeviceCode(): Promise<DeviceFlowResponse> {
+export async function requestDeviceCode(clientId: string = CLIENT_ID): Promise<DeviceFlowResponse> {
   const response = await requestUrl({
     url: GITHUB_DEVICE_URL,
     method: "POST",
@@ -18,7 +18,7 @@ export async function requestDeviceCode(): Promise<DeviceFlowResponse> {
       Accept: "application/json",
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: `client_id=${CLIENT_ID}&scope=repo`,
+    body: `client_id=${encodeURIComponent(clientId)}&scope=repo`,
     throw: false,
   });
 
@@ -38,7 +38,8 @@ export async function pollForToken(
   deviceCode: string,
   intervalSeconds: number,
   expiresIn: number,
-  onPollStart?: () => void
+  onPollStart?: () => void,
+  clientId: string = CLIENT_ID
 ): Promise<string> {
   const deadline = Date.now() + expiresIn * 1000;
   let currentInterval = intervalSeconds * 1000;
@@ -59,7 +60,7 @@ export async function pollForToken(
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: `client_id=${CLIENT_ID}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
+        body: `client_id=${encodeURIComponent(clientId)}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
         throw: false,
       });
 

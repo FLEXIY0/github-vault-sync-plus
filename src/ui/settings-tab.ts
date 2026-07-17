@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting, Notice, ButtonComponent } from "obsidia
 import type MultiSyncPlugin from "../main";
 import { requestDeviceCode, pollForToken } from "../auth/github-device";
 import { getAuthenticatedUser } from "../github/api";
+import { CLIENT_ID } from "../constants";
 
 export class MultiSyncSettingsTab extends PluginSettingTab {
   plugin: MultiSyncPlugin;
@@ -122,13 +123,90 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
         cls: "setting-item-description",
       });
     }
+
+    this.displayAdvancedSection(containerEl);
+  }
+
+  /**
+   * Collapsed by default so the main UI stays minimal. Lets the user avoid
+   * the built-in OAuth app entirely: their own OAuth app, or a personal
+   * access token scoped to a single repo.
+   */
+  private displayAdvancedSection(containerEl: HTMLElement): void {
+    const settings = this.plugin.settings;
+
+    const details = containerEl.createEl("details", { cls: "multisync-advanced" });
+    details.createEl("summary", { text: "Advanced: use your own access" });
+
+    // Own OAuth app
+    new Setting(details)
+      .setName("Custom OAuth Client ID")
+      .setDesc(
+        "Use your own GitHub OAuth app for the Connect button instead of the " +
+        "built-in one. Create it at github.com/settings/developers and tick " +
+        "\"Enable Device Flow\" in the app settings. Leave empty for the default."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(CLIENT_ID)
+          .setValue(settings.customClientId)
+          .onChange(async (val) => {
+            settings.customClientId = val.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // Personal access token
+    let patValue = "";
+    new Setting(details)
+      .setName("Personal Access Token")
+      .setDesc(
+        "Connect with a token instead of OAuth — no third-party app, and access " +
+        "can be limited to a single repo. Create a fine-grained token at " +
+        "github.com/settings/personal-access-tokens with Contents read/write on " +
+        "your vault repo (the repo must already exist), or use a classic token " +
+        "with the \"repo\" scope."
+      )
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("github_pat_… / ghp_…").onChange((val) => {
+          patValue = val.trim();
+        });
+      })
+      .addButton((btn) =>
+        btn
+          .setButtonText("Connect")
+          .setCta()
+          .onClick(async () => {
+            if (!patValue) {
+              new Notice("Paste a token first.");
+              return;
+            }
+            btn.setButtonText("Connecting…").setDisabled(true);
+            try {
+              const user = await getAuthenticatedUser(patValue);
+              this.plugin.settings.githubToken    = patValue;
+              this.plugin.settings.githubUsername = user.login;
+              await this.plugin.initializeRepo(patValue, user.login);
+              await this.plugin.saveSettings();
+              new Notice(`Connected as @${user.login} via token.`);
+              this.display();
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              new Notice(`Token connection failed: ${msg}`);
+              btn.setButtonText("Connect").setDisabled(false);
+            }
+          })
+      );
   }
 
   private async startDeviceFlow(btn: ButtonComponent): Promise<void> {
     btn.setButtonText("Connecting…").setDisabled(true);
 
+    const clientId = this.plugin.settings.customClientId || CLIENT_ID;
+
     try {
-      const deviceFlow = await requestDeviceCode();
+      const deviceFlow = await requestDeviceCode(clientId);
 
       // Show the user their one-time code
       const modal = this.containerEl.createDiv({ cls: "multisync-device-modal" });
@@ -152,7 +230,23 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
         "font-size:2rem;letter-spacing:0.25em;font-weight:700;" +
         "color:var(--text-normal);background:var(--background-primary);" +
         "border:2px solid var(--interactive-accent);border-radius:6px;" +
-        "padding:8px 24px;display:inline-block;margin:12px auto;font-family:monospace;";
+        "padding:8px 24px;display:inline-block;margin:12px auto;font-family:monospace;" +
+        "user-select:text;cursor:copy;";
+
+      const copyCode = async () => {
+        try {
+          await navigator.clipboard.writeText(deviceFlow.user_code);
+          new Notice("Code copied to clipboard.");
+        } catch {
+          new Notice("Could not copy — select the code manually.");
+        }
+      };
+      codeEl.title = "Click to copy";
+      codeEl.addEventListener("click", copyCode);
+
+      const copyBtn = modal.createEl("button", { text: "Copy code" });
+      copyBtn.addEventListener("click", copyCode);
+
       modal.createEl("p", {
         text: "Waiting for you to approve in the browser…",
         cls: "setting-item-description",
@@ -168,7 +262,9 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       const token = await pollForToken(
         deviceFlow.device_code,
         deviceFlow.interval,
-        deviceFlow.expires_in
+        deviceFlow.expires_in,
+        undefined,
+        clientId
       );
 
       modal.remove();

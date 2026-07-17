@@ -7,6 +7,7 @@ export interface PluginSettings {
   excludePatterns: string[];     // glob patterns to ignore (e.g. ".obsidian/workspace")
   lastSyncTime: number;          // unix timestamp of last successful sync
   commitMessageTemplate: string; // e.g. "sync: {{datetime}}"
+  customClientId: string;        // user's own OAuth app client_id ("" = built-in app)
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -22,6 +23,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   ],
   lastSyncTime: 0,
   commitMessageTemplate: "sync: {{datetime}}",
+  customClientId: "",
 };
 
 export interface DeviceFlowResponse {

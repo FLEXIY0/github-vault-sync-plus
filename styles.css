@@ -53,3 +53,28 @@
 .multisync-status.is-syncing .multisync-pct {
   display: inline;
 }
+
+/* Advanced settings section */
+
+.multisync-advanced {
+  margin-top: 24px;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 12px;
+}
+
+.multisync-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.multisync-advanced > summary:hover {
+  color: var(--text-normal);
+}
+
+/* Device-code panel copy button */
+
+.multisync-device-modal button {
+  margin-bottom: 8px;
+}
