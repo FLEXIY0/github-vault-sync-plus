@@ -68,6 +68,11 @@ export async function createRepo(
   });
 }
 
+/** List repositories under the authenticated user */
+export async function getUserRepos(token: string): Promise<GitHubRepo[]> {
+  return ghFetch<GitHubRepo[]>("/user/repos?per_page=100&sort=updated", token);
+}
+
 /** Derive a safe repo name from the vault name */
 export function vaultNameToRepoName(vaultName: string): string {
   return `obsidian-${vaultName

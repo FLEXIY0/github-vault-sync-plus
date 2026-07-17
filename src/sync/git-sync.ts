@@ -90,6 +90,9 @@ export class GitSync {
   /** Optional UI progress hook — safe to leave unset */
   onProgress: ProgressReporter | null = null;
 
+  /** Set true (temporarily) to bypass the mass-deletion guard */
+  allowMassDeletion = false;
+
   private report(percent: number | undefined, phase?: string): void {
     try {
       this.onProgress?.(percent, phase);
@@ -339,6 +342,7 @@ export class GitSync {
    */
   async sync(changedFiles: string[]): Promise<SyncResult> {
     const conflicts: ConflictFile[] = [];
+    let skippedDeletions = 0;
 
     try {
       // Kick off the remote-head check now so the network roundtrip overlaps
@@ -367,6 +371,19 @@ export class GitSync {
         // statusMatrix can throw on an unborn branch — stage everything we were given
         scanned = false;
         toAdd = changedFiles;
+        toRemove = [];
+      }
+
+      // Mass-deletion guard: a broken device (e.g. an empty phone vault) must
+      // never be able to wipe the repo. When a sync is mostly deletions, skip
+      // them and surface a warning; "force-delete" in the console bypasses.
+      if (
+        scanned &&
+        !this.allowMassDeletion &&
+        toRemove.length >= 10 &&
+        toRemove.length > toAdd.length + 5
+      ) {
+        skippedDeletions = toRemove.length;
         toRemove = [];
       }
 
@@ -488,10 +505,19 @@ export class GitSync {
       }
 
       this.report(100, "done");
-      return { success: conflicts.length === 0, conflictFiles: conflicts };
+      return {
+        success: conflicts.length === 0,
+        conflictFiles: conflicts,
+        skippedDeletions: skippedDeletions || undefined,
+      };
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
-      return { success: false, conflictFiles: [], error: msg };
+      return {
+        success: false,
+        conflictFiles: [],
+        error: msg,
+        skippedDeletions: skippedDeletions || undefined,
+      };
     }
   }
 
@@ -541,6 +567,76 @@ export class GitSync {
       });
     }
     this.report(100, "done");
+  }
+
+  /** Point origin at the current remote URL and drop stale tracking state */
+  async setOrigin(): Promise<void> {
+    try { await git.deleteRemote({ fs: this.fs, dir: this.dir, remote: "origin" }); } catch { /* none */ }
+    try {
+      await git.addRemote({ fs: this.fs, dir: this.dir, remote: "origin", url: this.remoteUrl });
+    } catch { /* already set */ }
+    try {
+      await git.deleteRef({ fs: this.fs, dir: this.dir, ref: `refs/remotes/origin/${DEFAULT_BRANCH}` });
+    } catch { /* none */ }
+    this.branchEtag = null;
+    this.lastRemoteSha = null;
+  }
+
+  /**
+   * Adopt the current remote after a repo switch, never losing local files:
+   * - empty remote → returns false (caller pushes everything);
+   * - related history → normal merge;
+   * - unrelated history / conflicts → graft: write remote files that are
+   *   missing locally, move the branch to the remote head, and rebuild the
+   *   index — local versions of shared files always win.
+   */
+  async adoptRemote(): Promise<boolean> {
+    this.report(undefined, "fetch");
+    const fetchHead = await this.safeFetch(this.netProgress(0, 60));
+    if (!fetchHead) return false;
+
+    const localHead = await this.resolveSafe(DEFAULT_BRANCH);
+    if (localHead === fetchHead) return true;
+
+    if (localHead) {
+      try {
+        await git.merge({
+          ...this.gitOpts(),
+          ours: DEFAULT_BRANCH,
+          theirs: fetchHead,
+          message: "sync: merge repositories",
+          fastForwardOnly: false,
+        });
+        this.report(100, "done");
+        return true;
+      } catch {
+        /* unrelated histories or conflicts — graft below, local files win */
+      }
+    }
+
+    this.report(70, "adopt");
+    const remoteFiles = await git.listFiles({ ...this.gitOpts(), ref: fetchHead });
+    for (const filepath of remoteFiles) {
+      const existsLocally = await this.fs.promises
+        .stat(`${this.dir}/${filepath}`)
+        .then(() => true, () => false);
+      if (existsLocally) continue;
+      try {
+        const { blob } = await git.readBlob({ ...this.gitOpts(), oid: fetchHead, filepath });
+        await this.fs.promises.writeFile(`${this.dir}/${filepath}`, blob);
+      } catch { /* skip unreadable entries */ }
+    }
+    await git.writeRef({
+      fs: this.fs,
+      dir: this.dir,
+      ref: `refs/heads/${DEFAULT_BRANCH}`,
+      value: fetchHead,
+      force: true,
+    });
+    // Rebuild the index from scratch against the adopted head
+    try { await this.fs.promises.unlink(`${this.dir}/.git/index`); } catch { /* rebuilt lazily */ }
+    this.report(100, "done");
+    return true;
   }
 
   /** Recent commits on main, newest first (for the heatmap / console) */
@@ -641,6 +737,24 @@ export class GitSync {
    * The pre-restore state stays in history and can be restored back.
    */
   async restoreCommit(oid: string): Promise<void> {
+    // Safety snapshot: commit the current state first, so a restore can
+    // itself always be undone from the history.
+    try {
+      const matrix = await git.statusMatrix(this.gitOpts());
+      let dirty = false;
+      for (const [filepath, head, workdir, stage] of matrix) {
+        if (head === 1 && workdir === 1 && stage === 1) continue;
+        dirty = true;
+        try {
+          if (workdir === 0) await git.remove({ ...this.gitOpts(), filepath });
+          else await git.add({ ...this.gitOpts(), filepath });
+        } catch { /* skip */ }
+      }
+      if (dirty) {
+        await git.commit({ ...this.gitOpts(), message: "sync: pre-restore snapshot" });
+      }
+    } catch { /* best effort */ }
+
     await git.checkout({
       ...this.gitOpts(),
       ref: oid,
@@ -669,6 +783,54 @@ export class GitSync {
 
   getRemoteUrl(): string {
     return this.remoteUrl;
+  }
+
+  /**
+   * Switch the local git remote to point at a different repo URL,
+   * then force-push the current branch so the new repo gets the vault content.
+   * Returns true if the switch happened, false if already pointing at this URL.
+   */
+  async updateRemote(): Promise<boolean> {
+    let currentUrl: string | undefined;
+    try {
+      currentUrl = await git.getConfig({
+        ...this.gitOpts(),
+        path: "remote.origin.url",
+      }) as string | undefined;
+    } catch {
+      // no config yet
+    }
+
+    if (currentUrl === this.remoteUrl) return false;
+
+    // Reconfigure remote origin to the new URL
+    try {
+      await git.deleteRemote({ fs: this.fs, dir: this.dir, remote: "origin" });
+    } catch { /* didn't exist */ }
+    await git.addRemote({
+      fs: this.fs,
+      dir: this.dir,
+      remote: "origin",
+      url: this.remoteUrl,
+    });
+
+    // Force-push current branch to the new remote
+    if (await this.hasLocalBranch()) {
+      this.report(50, "push");
+      await git.push({
+        ...this.netOpts(),
+        ref: DEFAULT_BRANCH,
+        force: true,
+        onProgress: this.netProgress(50, 50),
+      });
+      this.report(100, "push");
+    }
+
+    // Reset cached remote state so the next sync doesn't skip the fetch
+    this.lastRemoteSha = null;
+    this.branchEtag = null;
+
+    return true;
   }
 
   /** Human-readable list of added/modified/deleted files vs HEAD */

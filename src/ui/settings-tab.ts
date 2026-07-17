@@ -1,11 +1,12 @@
 import { App, PluginSettingTab, Setting, Notice, ButtonComponent } from "obsidian";
 import type MultiSyncPlugin from "../main";
 import { requestDeviceCode, pollForToken } from "../auth/github-device";
-import { getAuthenticatedUser } from "../github/api";
+import { getAuthenticatedUser, getUserRepos } from "../github/api";
 import { CLIENT_ID } from "../constants";
 import { t, getLang, setLang, Lang } from "../i18n";
 import { CommitInfo, FileChange } from "../sync/git-sync";
 import { CommitDetailModal } from "./commit-modal";
+import { ConfirmModal } from "./confirm-modal";
 
 export class MultiSyncSettingsTab extends PluginSettingTab {
   plugin: MultiSyncPlugin;
@@ -30,21 +31,9 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    // Header with language toggle in the top-right corner
+    // Header
     const header = containerEl.createDiv({ cls: "multisync-header" });
     header.createEl("h2", { text: t("settingsTitle") });
-    const langBtn = header.createEl("button", {
-      text: getLang().toUpperCase(),
-      cls: "multisync-lang",
-    });
-    langBtn.addEventListener("click", async () => {
-      const next: Lang = getLang() === "en" ? "ru" : "en";
-      this.plugin.settings.language = next;
-      setLang(next);
-      await this.plugin.saveSettings();
-      this.plugin.setStatus("idle");
-      this.display();
-    });
 
     const settings = this.plugin.settings;
 
@@ -71,7 +60,69 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName(t("vaultRepo"))
-        .setDesc(`github.com/${settings.githubUsername}/${settings.repoName}`);
+        .setDesc(`github.com/${settings.githubUsername}/${settings.repoName}`)
+        .addDropdown(async (dropdown) => {
+          if (settings.repoName) {
+            dropdown.addOption(settings.repoName, settings.repoName);
+            dropdown.setValue(settings.repoName);
+          }
+
+          try {
+            // Only repos with "obsidian" in the name are valid sync targets
+            const repos = (await getUserRepos(settings.githubToken)).filter((r) =>
+              r.name.toLowerCase().includes("obsidian")
+            );
+            dropdown.selectEl.innerHTML = "";
+            let currentExists = false;
+            for (const r of repos) {
+              dropdown.addOption(r.name, r.name);
+              if (r.name === settings.repoName) {
+                currentExists = true;
+              }
+            }
+            if (settings.repoName && !currentExists) {
+              dropdown.addOption(settings.repoName, settings.repoName);
+            }
+            dropdown.setValue(settings.repoName);
+          } catch (err) {
+            console.error("Failed to fetch GitHub repositories:", err);
+          }
+
+          dropdown.onChange((val) => {
+            if (val === settings.repoName) return;
+
+            const confirmMsg = t("changeRepoConfirm").replace("{{repo}}", val);
+            new ConfirmModal(
+              this.app,
+              confirmMsg,
+              async () => {
+                // switchRepo merges histories safely — local files always win
+                await this.plugin.switchRepo(val);
+                this.display();
+              },
+              () => {
+                dropdown.setValue(settings.repoName);
+              }
+            ).open();
+          });
+        });
+
+      // Create/switch to a brand-new repo by name ("obsidian" enforced)
+      let newRepoName = "";
+      new Setting(containerEl)
+        .setName(t("newRepoName"))
+        .setDesc(t("newRepoDesc"))
+        .addText((el) =>
+          el.setPlaceholder("obsidian-…").onChange((v) => (newRepoName = v.trim()))
+        )
+        .addButton((btn) =>
+          btn.setButtonText(t("switchBtn")).onClick(async () => {
+            if (!newRepoName) return;
+            btn.setDisabled(true).setButtonText(t("connectingBtn"));
+            await this.plugin.switchRepo(newRepoName);
+            this.display();
+          })
+        );
     } else {
       new Setting(containerEl)
         .setName(t("connectName"))
@@ -337,6 +388,11 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
           case "checkout": if (args[0]) { await g.checkoutRef(args[0]); print(`→ ${args[0]}`); } break;
           case "restore":  if (args[0]) { await g.restoreCommit(args[0]); print(t("restored")); } break;
           case "sync":     await this.plugin.triggerManualSync(); print("✓"); break;
+          case "force-delete":
+            g.allowMassDeletion = true;
+            try { await this.plugin.triggerManualSync(); } finally { g.allowMassDeletion = false; }
+            print("✓");
+            break;
           case "pull":     await g.pull(); print("✓"); break;
           case "push":     await g.pushNow(); print("✓"); break;
           case "remote":   print(g.getRemoteUrl()); break;
@@ -404,6 +460,23 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
 
     const details = containerEl.createEl("details", { cls: "multisync-advanced" });
     details.createEl("summary", { text: t("advanced") });
+
+    new Setting(details)
+      .setName(t("languageOptionName"))
+      .setDesc(t("languageOptionDesc"))
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("en", "English")
+          .addOption("ru", "Русский")
+          .setValue(getLang())
+          .onChange(async (val: Lang) => {
+            this.plugin.settings.language = val;
+            setLang(val);
+            await this.plugin.saveSettings();
+            this.plugin.setStatus("idle");
+            this.display();
+          });
+      });
 
     new Setting(details)
       .setName(t("clientId"))

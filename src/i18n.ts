@@ -69,6 +69,7 @@ const en = {
     "checkout <ref>    switch to branch/commit\n" +
     "restore <sha>     restore vault to commit\n" +
     "sync | pull | push\n" +
+    "force-delete      sync including mass deletions\n" +
     "remote            show remote URL\n" +
     "clear             clear output",
   branches: "Branches",
@@ -86,6 +87,18 @@ const en = {
   clonedRepo: "Cloned repo",
   initialisedRepo: "Initialised repo",
   reconnected: "Reconnected to",
+  changeRepoConfirm: "Are you sure you want to change the repository to {{repo}}? This will switch the remote sync target. Files are merged; local versions always win — nothing is deleted.",
+  changeRepoConfirmTitle: "Confirm Repository Change",
+  confirm: "Confirm",
+  repoChangedNotice: "Repository changed to {{repo}}.",
+  languageOptionName: "Language",
+  languageOptionDesc: "Select the interface language.",
+  newRepoName: "New repository",
+  newRepoDesc: "Create (or switch to) a repo by name. \"obsidian\" is required in the name and added automatically if missing.",
+  switchBtn: "Switch",
+  switchedTo: "Switched to",
+  switchFailed: "Switch failed",
+  deletionGuardNotice: "Mass-deletion guard: file deletions were NOT synced. If intentional, run force-delete in the Git Console.",
   // status bar
   stSyncing: "Syncing",
   stConflict: "Conflict",
@@ -167,6 +180,7 @@ const ru: typeof en = {
     "checkout <ref>    переключиться на ветку/коммит\n" +
     "restore <sha>     восстановить хранилище к коммиту\n" +
     "sync | pull | push\n" +
+    "force-delete      синк вместе с массовыми удалениями\n" +
     "remote            показать адрес репозитория\n" +
     "clear             очистить вывод",
   branches: "Ветки",
@@ -184,6 +198,18 @@ const ru: typeof en = {
   clonedRepo: "Клонирован репозиторий",
   initialisedRepo: "Инициализирован репозиторий",
   reconnected: "Переподключено к",
+  changeRepoConfirm: "Переключить репозиторий на {{repo}}? Цель синхронизации изменится. Файлы объединяются, локальные версии в приоритете — ничего не удаляется.",
+  changeRepoConfirmTitle: "Подтверждение смены репозитория",
+  confirm: "Подтвердить",
+  repoChangedNotice: "Репозиторий изменён на {{repo}}.",
+  languageOptionName: "Язык",
+  languageOptionDesc: "Выбор языка интерфейса.",
+  newRepoName: "Новый репозиторий",
+  newRepoDesc: "Создать репозиторий (или переключиться) по имени. В названии обязательно «obsidian» — если нет, добавится автоматически.",
+  switchBtn: "Переключить",
+  switchedTo: "Переключено на",
+  switchFailed: "Не удалось переключить",
+  deletionGuardNotice: "Защита от массового удаления: удаления файлов НЕ синхронизированы. Если это намеренно — выполните force-delete в Git-консоли.",
   stSyncing: "Синк",
   stConflict: "Конфликт",
   stError: "Ошибка синка",

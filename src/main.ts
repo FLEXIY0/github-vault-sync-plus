@@ -113,11 +113,11 @@ export default class MultiSyncPlugin extends Plugin {
    * Called after the user connects their GitHub account.
    * Determines whether to clone (existing repo) or init+push (new repo).
    */
-  async initializeRepo(token: string, username: string): Promise<void> {
+  async initializeRepo(token: string, username: string, customRepoName?: string): Promise<void> {
     this.setStatus("connecting");
 
     const vaultName = this.app.vault.getName();
-    const repoName  = vaultNameToRepoName(vaultName);
+    const repoName  = customRepoName || vaultNameToRepoName(vaultName);
     this.settings.repoName = repoName;
 
     const adapter = this.app.vault.adapter;
@@ -138,8 +138,14 @@ export default class MultiSyncPlugin extends Plugin {
     if (!exists) {
       // Brand-new vault — create repo and push everything
       await createRepo(token, repoName, `Obsidian vault: ${vaultName}`);
-      await sync.initAndPush(allFiles());
-      new Notice(`${t("createdRepo")}: ${username}/${repoName}`);
+      if (alreadyInit) {
+        // Local git exists (switching from another repo) — update remote and force-push
+        await sync.updateRemote();
+        new Notice(`${t("createdRepo")}: ${username}/${repoName}`);
+      } else {
+        await sync.initAndPush(allFiles());
+        new Notice(`${t("createdRepo")}: ${username}/${repoName}`);
+      }
     } else if (!alreadyInit) {
       // Repo exists remotely, this is a new device — clone it.
       // clone() returns false when the remote is empty (a previous initAndPush
@@ -153,10 +159,13 @@ export default class MultiSyncPlugin extends Plugin {
         new Notice(`${t("clonedRepo")}: ${username}/${repoName}`);
       }
     } else {
-      // Already initialised locally — ensure remote URL is current, then reconnect.
-      // Also handles the case where a previous push was interrupted (local branch
-      // exists but remote is empty): ensureLocalBranch will push on next sync.
-      new Notice(`${t("reconnected")}: ${username}/${repoName}`);
+      // Already initialised locally — update remote URL if changed, then reconnect.
+      const switched = await sync.updateRemote();
+      if (switched) {
+        new Notice(`${t("reconnected")}: ${username}/${repoName}`);
+      } else {
+        new Notice(`${t("reconnected")}: ${username}/${repoName}`);
+      }
     }
 
     this.settings.lastSyncTime = Date.now();
@@ -222,6 +231,9 @@ export default class MultiSyncPlugin extends Plugin {
         ...this.selfSyncFiles(),
       ]);
 
+      if (result.skippedDeletions) {
+        new Notice(`${t("deletionGuardNotice")} (${result.skippedDeletions})`, 10000);
+      }
       if (result.conflictFiles.length > 0) {
         this.setStatus("conflict");
         this.showConflictModal(result.conflictFiles);
@@ -238,6 +250,46 @@ export default class MultiSyncPlugin extends Plugin {
       const msg = err instanceof Error ? err.message : String(err);
       this.setStatus("error", msg);
       new Notice(`${t("syncFailed")}: ${msg}`);
+    }
+  }
+
+  /**
+   * Switch the vault to a different GitHub repo. Repo names must contain
+   * "obsidian" (prefixed automatically otherwise); a missing repo is created.
+   * Local files always survive: histories merge, or the remote is adopted
+   * with a union of files where local versions win.
+   */
+  async switchRepo(rawName: string): Promise<void> {
+    const { githubToken: token, githubUsername: username } = this.settings;
+    if (!token || !username) {
+      new Notice(t("notConnected"));
+      return;
+    }
+    let repoName = rawName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (!repoName) return;
+    if (!repoName.includes("obsidian")) repoName = `obsidian-${repoName}`;
+    if (repoName === this.settings.repoName) return;
+
+    this.setStatus("connecting");
+    try {
+      if (!(await repoExists(token, username, repoName))) {
+        await createRepo(token, repoName, `Obsidian vault: ${this.app.vault.getName()}`);
+      }
+      this.settings.repoName = repoName;
+      await this.saveSettings();
+      await this.bootSyncEngine();
+      await this.gitSync!.setOrigin();
+      await this.gitSync!.adoptRemote();
+      await this.triggerManualSync();
+      new Notice(`${t("switchedTo")}: ${username}/${repoName}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.setStatus("error", msg);
+      new Notice(`${t("switchFailed")}: ${msg}`);
     }
   }
 

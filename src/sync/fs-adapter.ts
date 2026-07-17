@@ -29,7 +29,7 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
     // The vault root itself (isomorphic-git walkers readdir/stat it) must map
     // to Obsidian's root path "/" — otherwise directory walks silently fail
     // and statusMatrix sees an empty vault.
-    if (normalized === base || normalized === "" || normalized === "/") {
+    if (normalized === base || normalized === "" || normalized === "/" || normalized === ".") {
       return "/";
     }
     if (base && normalized.startsWith(base + "/")) {

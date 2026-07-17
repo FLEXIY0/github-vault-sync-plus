@@ -69,4 +69,6 @@ export interface SyncResult {
   success: boolean;
   conflictFiles: ConflictFile[];
   error?: string;
+  /** Set when the mass-deletion guard skipped syncing deletions */
+  skippedDeletions?: number;
 }
