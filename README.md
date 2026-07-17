@@ -1,4 +1,4 @@
-# Git Sync
+# Git Sync+
 
 > Sync your Obsidian vault across every device using your own **free private GitHub repo**.  
 > No subscription. No cloud fees. Works on desktop (Windows / macOS / Linux) and mobile (iOS / Android).
@@ -61,7 +61,7 @@ Laptop   ──┘
 ### 1.1 — Clone the Repository
 
 ```bash
-git clone https://github.com/livan116/github-valut-sync.git
+git clone https://github.com/FLEXIY0/github-vault-sync-plus.git
 cd github-valut-sync
 ```
 
@@ -89,7 +89,7 @@ This is done **once** — the `client_id` is then baked into the plugin code.
    | Field | Value |
    |---|---|
    | Application name | `GitHub Vault Sync` |
-   | Homepage URL | `https://github.com/livan116/github-valut-sync` |
+   | Homepage URL | `https://github.com/FLEXIY0/github-vault-sync-plus` |
    | Authorization callback URL | `https://obsidian.md` *(placeholder — Device Flow doesn't use this)* |
 
 4. Click **Register application**
@@ -180,7 +180,7 @@ ln -s /path/to/github-valut-sync /path/to/vault/.obsidian/plugins/github-vault-s
 
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from Community Plugins.
 2. Open BRAT settings → **Add Beta Plugin**
-3. Paste the repo URL: `https://github.com/livan116/github-valut-sync`
+3. Paste the repo URL: `https://github.com/FLEXIY0/github-vault-sync-plus`
 4. Click **Add Plugin** — BRAT installs it automatically.
 
 ---
@@ -443,7 +443,7 @@ Pull requests welcome!
 
 ```bash
 # 1. Fork and clone
-git clone https://github.com/livan116/github-valut-sync.git
+git clone https://github.com/FLEXIY0/github-vault-sync-plus.git
 cd github-valut-sync
 
 # 2. Install deps
@@ -461,10 +461,10 @@ npm run dev
 npx tsc --noEmit
 ```
 
-For bugs and feature requests, open an [issue](https://github.com/livan116/github-valut-sync/issues).
+For bugs and feature requests, open an [issue](https://github.com/FLEXIY0/github-vault-sync-plus/issues).
 
 ---
 
 ## License
 
-MIT © 2025 Livan Kumar
+MIT © 2025 Livan Kumar (original), © 2026 FLEXIY0 (Git Sync+ fork)

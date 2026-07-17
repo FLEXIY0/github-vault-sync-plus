@@ -58,6 +58,15 @@ const gitHttp = {
  */
 export type ProgressReporter = (percent: number | undefined, phase?: string) => void;
 
+export type CommitInfo = {
+  oid: string;
+  message: string;
+  timestamp: number;
+  parents: string[];
+};
+
+export type FileChange = { path: string; type: "add" | "del" | "mod" };
+
 export class GitSync {
   private fs: ReturnType<typeof createFsAdapter>;
   private dir: string;
@@ -535,16 +544,94 @@ export class GitSync {
   }
 
   /** Recent commits on main, newest first (for the heatmap / console) */
-  async recentCommits(depth = 500): Promise<{ oid: string; message: string; timestamp: number }[]> {
+  async recentCommits(depth = 500): Promise<CommitInfo[]> {
     try {
       const entries = await git.log({ ...this.gitOpts(), ref: DEFAULT_BRANCH, depth });
       return entries.map((e) => ({
         oid: e.oid,
         message: e.commit.message.split("\n")[0],
         timestamp: e.commit.committer.timestamp * 1000,
+        parents: e.commit.parent,
       }));
     } catch {
       return [];
+    }
+  }
+
+  /** ASCII commit tree for the console, with branch labels */
+  async graphText(n = 25): Promise<string> {
+    const commits = await this.recentCommits(n);
+    if (commits.length === 0) return "(empty)";
+    const main   = await this.resolveSafe(DEFAULT_BRANCH);
+    const origin = await this.resolveSafe(`refs/remotes/origin/${DEFAULT_BRANCH}`);
+    const lines: string[] = [];
+    commits.forEach((c, i) => {
+      const labels: string[] = [];
+      if (c.oid === main) labels.push(DEFAULT_BRANCH);
+      if (c.oid === origin) labels.push(`origin/${DEFAULT_BRANCH}`);
+      const sym = c.parents.length > 1 ? "◉" : "●";
+      const lbl = labels.length ? ` (${labels.join(", ")})` : "";
+      const d = new Date(c.timestamp);
+      lines.push(
+        `${sym} ${c.oid.slice(0, 7)}${lbl}  ${d.toLocaleDateString()} ${d.toLocaleTimeString().slice(0, 5)}  ${c.message}`
+      );
+      if (i < commits.length - 1) lines.push(c.parents.length > 1 ? "├─╮" : "│");
+    });
+    return lines.join("\n");
+  }
+
+  /** First parent of a commit, or null for the root commit */
+  async parentOf(oid: string): Promise<string | null> {
+    try {
+      const { commit } = await git.readCommit({ ...this.gitOpts(), oid });
+      return commit.parent[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Files changed by a commit relative to its first parent */
+  async commitChanges(oid: string): Promise<FileChange[]> {
+    const parent = await this.parentOf(oid);
+    if (!parent) {
+      // Root commit — everything in it is new
+      const files = await git.listFiles({ ...this.gitOpts(), ref: oid });
+      return files.map((path) => ({ path, type: "add" as const }));
+    }
+    const results = await git.walk({
+      fs: this.fs,
+      dir: this.dir,
+      cache: this.cache,
+      trees: [git.TREE({ ref: parent }), git.TREE({ ref: oid })],
+      map: async (filepath, entries) => {
+        if (filepath === ".") return undefined;
+        const [a, b] = entries ?? [];
+        const aType = a ? await a.type() : null;
+        const bType = b ? await b.type() : null;
+        if (aType === "tree" || bType === "tree") {
+          // Prune identical subtrees, descend into differing ones
+          if (aType === "tree" && bType === "tree" && (await a!.oid()) === (await b!.oid())) {
+            return null;
+          }
+          return undefined;
+        }
+        const aOid = a ? await a.oid() : null;
+        const bOid = b ? await b.oid() : null;
+        if (aOid === bOid) return undefined;
+        const type = !aOid ? "add" : !bOid ? "del" : "mod";
+        return { path: filepath, type };
+      },
+    });
+    return (results as (FileChange | undefined)[]).filter(Boolean) as FileChange[];
+  }
+
+  /** UTF-8 content of a file at a given commit, or null if absent */
+  async fileAt(oid: string, filepath: string): Promise<string | null> {
+    try {
+      const { blob } = await git.readBlob({ ...this.gitOpts(), oid, filepath });
+      return new TextDecoder().decode(blob);
+    } catch {
+      return null;
     }
   }
 

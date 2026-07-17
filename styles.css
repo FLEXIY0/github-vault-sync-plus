@@ -244,3 +244,106 @@
 .multisync-term-input:focus {
   outline: none;
 }
+
+/* Commit hover mini-preview */
+
+.multisync-commit-row {
+  cursor: pointer;
+}
+
+.multisync-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 380px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+  font-size: var(--font-ui-smaller);
+  pointer-events: none;
+}
+
+.multisync-tip-head {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+}
+
+.multisync-tip-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multisync-tip-badge {
+  font-family: var(--font-monospace);
+  font-weight: 700;
+  width: 1em;
+}
+
+.multisync-tip-badge.is-add { color: var(--color-green); }
+.multisync-tip-badge.is-del { color: var(--color-red); }
+.multisync-tip-badge.is-mod { color: var(--color-yellow); }
+
+/* Commit detail modal: file chips + diff */
+
+.multisync-commit-modal {
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.multisync-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+  flex-shrink: 0;
+}
+
+.multisync-file-chip {
+  font-size: var(--font-ui-smaller);
+  font-family: var(--font-monospace);
+  padding: 2px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multisync-file-chip.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.multisync-file-chip.is-add:not(.is-active) { color: var(--color-green); }
+.multisync-file-chip.is-del:not(.is-active) { color: var(--color-red); }
+
+.multisync-diff {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary-alt);
+  padding: 8px 10px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.multisync-diff-line.is-add {
+  background: rgba(var(--color-green-rgb), 0.14);
+  color: var(--color-green);
+}
+
+.multisync-diff-line.is-del {
+  background: rgba(var(--color-red-rgb), 0.12);
+  color: var(--color-red);
+}

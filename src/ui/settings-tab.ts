@@ -4,13 +4,22 @@ import { requestDeviceCode, pollForToken } from "../auth/github-device";
 import { getAuthenticatedUser } from "../github/api";
 import { CLIENT_ID } from "../constants";
 import { t, getLang, setLang, Lang } from "../i18n";
-
-type CommitInfo = { oid: string; message: string; timestamp: number };
+import { CommitInfo, FileChange } from "../sync/git-sync";
+import { CommitDetailModal } from "./commit-modal";
 
 export class MultiSyncSettingsTab extends PluginSettingTab {
   plugin: MultiSyncPlugin;
   private termHistory: string[] = [];
   private termHistoryIdx = -1;
+  private changesCache = new Map<string, FileChange[]>();
+
+  private async getChanges(oid: string): Promise<FileChange[]> {
+    const cached = this.changesCache.get(oid);
+    if (cached) return cached;
+    const changes = await this.plugin.gitSync!.commitChanges(oid);
+    this.changesCache.set(oid, changes);
+    return changes;
+  }
 
   constructor(app: App, plugin: MultiSyncPlugin) {
     super(app, plugin);
@@ -215,6 +224,50 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       row.createSpan({ cls: "multisync-commit-time", text: time });
       row.createSpan({ cls: "multisync-commit-msg", text: c.message });
       row.createSpan({ cls: "multisync-commit-sha", text: c.oid.slice(0, 7) });
+
+      // Hover: floating mini-preview of the changed files
+      let tip: HTMLElement | null = null;
+      let tipTimer = 0;
+      const hideTip = () => {
+        window.clearTimeout(tipTimer);
+        tip?.remove();
+        tip = null;
+      };
+      row.addEventListener("mouseenter", () => {
+        tipTimer = window.setTimeout(async () => {
+          const changes = await this.getChanges(c.oid).catch(() => [] as FileChange[]);
+          if (!row.isConnected) return;
+          hideTip();
+          tip = document.body.createDiv({ cls: "multisync-tip" });
+          const rect = row.getBoundingClientRect();
+          tip.style.left = `${rect.left + 24}px`;
+          tip.style.top = `${rect.bottom + 4}px`;
+          tip.createDiv({
+            cls: "multisync-tip-head",
+            text: `${changes.length} ${t("filesWord")}`,
+          });
+          for (const change of changes.slice(0, 10)) {
+            const line = tip.createDiv({ cls: "multisync-tip-line" });
+            line.createSpan({
+              cls: `multisync-tip-badge is-${change.type}`,
+              text: change.type === "add" ? "+" : change.type === "del" ? "−" : "±",
+            });
+            line.createSpan({ text: change.path });
+          }
+          if (changes.length > 10) {
+            tip.createDiv({ cls: "multisync-tip-line", text: `… +${changes.length - 10}` });
+          }
+        }, 250);
+      });
+      row.addEventListener("mouseleave", hideTip);
+
+      // Click: side panel with the file list and per-file diff
+      row.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).tagName === "BUTTON") return;
+        hideTip();
+        new CommitDetailModal(this.app, this.plugin, c).open();
+      });
+
       const btn = row.createEl("button", { text: t("restore"), cls: "multisync-restore" });
       btn.addEventListener("click", async () => {
         if (!window.confirm(t("restoreConfirm"))) return;
@@ -274,6 +327,12 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
             ).join("\n") || t("historyEmpty"));
             break;
           }
+          case "graph":
+          case "tree": {
+            const n = Math.min(parseInt(args[0] ?? "25", 10) || 25, 100);
+            print(await g.graphText(n));
+            break;
+          }
           case "branch":   print(await g.listBranchesText()); break;
           case "checkout": if (args[0]) { await g.checkoutRef(args[0]); print(`→ ${args[0]}`); } break;
           case "restore":  if (args[0]) { await g.restoreCommit(args[0]); print(t("restored")); } break;
@@ -292,6 +351,7 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       [t("syncNowBtn"), "sync"],
       ["Pull", "pull"],
       ["Push", "push"],
+      [t("graphChip"), "graph"],
       [t("branches"), "branch"],
       ["Log", "log"],
       ["Status", "status"],

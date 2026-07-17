@@ -1,11 +1,11 @@
 {
   "id": "git-obsi-sync",
   "name": "Git Sync+",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "minAppVersion": "1.0.1",
-  "description": "Sync your vault across all devices using your own GitHub account. Free forever.",
-  "author": "Livan Kumar",
-  "authorUrl": "https://github.com/livan116",
+  "description": "Git Sync+ — sync your vault across all devices using your own GitHub account. Free forever.",
+  "author": "FLEXIY0",
+  "authorUrl": "",
   "fundingUrl": "",
   "isDesktopOnly": false
 }

@@ -64,6 +64,7 @@ const en = {
     "help              this help\n" +
     "status            changed files\n" +
     "log [n]           last n commits (default 10)\n" +
+    "graph [n]         commit tree with branch labels\n" +
     "branch            list branches\n" +
     "checkout <ref>    switch to branch/commit\n" +
     "restore <sha>     restore vault to commit\n" +
@@ -71,6 +72,11 @@ const en = {
     "remote            show remote URL\n" +
     "clear             clear output",
   branches: "Branches",
+  graphChip: "Tree",
+  filesWord: "files",
+  loadingDiff: "Loading changes…",
+  noChanges: "No changes.",
+  tooLarge: "File is too large to diff.",
   clean: "Working tree clean.",
   notConnected: "Git Sync+: not connected. Please connect your GitHub account in settings.",
   syncedOk: "Vault synced successfully.",
@@ -156,6 +162,7 @@ const ru: typeof en = {
     "help              эта справка\n" +
     "status            изменённые файлы\n" +
     "log [n]           последние n коммитов (по умолч. 10)\n" +
+    "graph [n]         дерево коммитов с метками веток\n" +
     "branch            список веток\n" +
     "checkout <ref>    переключиться на ветку/коммит\n" +
     "restore <sha>     восстановить хранилище к коммиту\n" +
@@ -163,6 +170,11 @@ const ru: typeof en = {
     "remote            показать адрес репозитория\n" +
     "clear             очистить вывод",
   branches: "Ветки",
+  graphChip: "Дерево",
+  filesWord: "файлов",
+  loadingDiff: "Загрузка изменений…",
+  noChanges: "Изменений нет.",
+  tooLarge: "Файл слишком большой для сравнения.",
   clean: "Изменений нет.",
   notConnected: "Git Sync+: не подключено. Подключите аккаунт GitHub в настройках.",
   syncedOk: "Хранилище синхронизировано.",
