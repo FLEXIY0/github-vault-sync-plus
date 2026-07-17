@@ -1,14 +1,17 @@
 import { Plugin } from "obsidian";
 import { SyncStatus } from "../types";
+import { t } from "../i18n";
 
-const STATUS_ICONS: Record<SyncStatus, string> = {
-  idle:       "✓",
-  pulling:    "↓ Syncing",
-  pushing:    "↑ Syncing",
-  conflict:   "⚠ Conflict",
-  error:      "✗ Sync Error",
-  connecting: "… Connecting",
-};
+function statusLabel(status: SyncStatus): string {
+  switch (status) {
+    case "idle":       return "✓";
+    case "pulling":    return `↓ ${t("stSyncing")}`;
+    case "pushing":    return `↑ ${t("stSyncing")}`;
+    case "conflict":   return `⚠ ${t("stConflict")}`;
+    case "error":      return `✗ ${t("stError")}`;
+    case "connecting": return `… ${t("stConnecting")}`;
+  }
+}
 
 const BUSY_STATUSES: SyncStatus[] = ["pulling", "pushing", "connecting"];
 
@@ -16,12 +19,12 @@ const BUSY_STATUSES: SyncStatus[] = ["pulling", "pushing", "connecting"];
 function formatAgo(ts: number): string {
   if (!ts) return "";
   const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return "now";
+  if (s < 60) return t("stNow");
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
+  if (m < 60) return `${m}${t("sufMin")}`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
+  if (h < 24) return `${h}${t("sufHour")}`;
+  return `${Math.floor(h / 24)}${t("sufDay")}`;
 }
 
 export class StatusBarItem {
@@ -49,14 +52,14 @@ export class StatusBarItem {
 
   set(status: SyncStatus, detail?: string): void {
     this.status = status;
-    const label = STATUS_ICONS[status];
+    const label = statusLabel(status);
 
     if (status === "idle") {
       const ago = formatAgo(this.getLastSync());
-      this.labelEl.setText(ago ? `${label} ${ago}` : `${label} Synced`);
+      this.labelEl.setText(ago ? `${label} ${ago}` : `${label} ${t("stSynced")}`);
       const last = this.getLastSync();
       if (last) {
-        const full = `Last synced: ${new Date(last).toLocaleString()}`;
+        const full = `${t("lastSynced")}: ${new Date(last).toLocaleString()}`;
         this.el.setAttribute("aria-label", full);
         this.el.setAttribute("title", full);
       }

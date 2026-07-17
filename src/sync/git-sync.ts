@@ -534,6 +534,76 @@ export class GitSync {
     this.report(100, "done");
   }
 
+  /** Recent commits on main, newest first (for the heatmap / console) */
+  async recentCommits(depth = 500): Promise<{ oid: string; message: string; timestamp: number }[]> {
+    try {
+      const entries = await git.log({ ...this.gitOpts(), ref: DEFAULT_BRANCH, depth });
+      return entries.map((e) => ({
+        oid: e.oid,
+        message: e.commit.message.split("\n")[0],
+        timestamp: e.commit.committer.timestamp * 1000,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Restore the working tree to a past commit WITHOUT rewriting history:
+   * checkout the old tree in place, record it as a new commit, push.
+   * The pre-restore state stays in history and can be restored back.
+   */
+  async restoreCommit(oid: string): Promise<void> {
+    await git.checkout({
+      ...this.gitOpts(),
+      ref: oid,
+      force: true,
+      noUpdateHead: true,
+    });
+    await git.commit({
+      ...this.gitOpts(),
+      message: `sync: restore ${oid.slice(0, 7)}`,
+    });
+    await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH });
+  }
+
+  /** "* main\n  feature-x" style branch listing */
+  async listBranchesText(): Promise<string> {
+    const branches = await git.listBranches({ fs: this.fs, dir: this.dir });
+    let current: string | null = null;
+    try { current = (await git.currentBranch({ fs: this.fs, dir: this.dir })) ?? null; } catch { /* detached */ }
+    if (branches.length === 0) return "(no branches)";
+    return branches.map((b) => (b === current ? `* ${b}` : `  ${b}`)).join("\n");
+  }
+
+  async checkoutRef(ref: string): Promise<void> {
+    await git.checkout({ ...this.gitOpts(), ref });
+  }
+
+  getRemoteUrl(): string {
+    return this.remoteUrl;
+  }
+
+  /** Human-readable list of added/modified/deleted files vs HEAD */
+  async statusText(): Promise<string> {
+    const matrix = await git.statusMatrix(this.gitOpts());
+    const lines: string[] = [];
+    for (const [filepath, head, workdir] of matrix) {
+      if (head === 0 && workdir === 2) lines.push(`A  ${filepath}`);
+      else if (head === 1 && workdir === 2) lines.push(`M  ${filepath}`);
+      else if (head === 1 && workdir === 0) lines.push(`D  ${filepath}`);
+    }
+    if (lines.length === 0) return "";
+    const shown = lines.slice(0, 30);
+    if (lines.length > 30) shown.push(`… +${lines.length - 30}`);
+    return shown.join("\n");
+  }
+
+  /** Bare push for the console */
+  async pushNow(): Promise<void> {
+    await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH });
+  }
+
   private async readFileContent(filepath: string): Promise<string> {
     try {
       const buf = await this.fs.promises.readFile(

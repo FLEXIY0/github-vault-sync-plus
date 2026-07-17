@@ -3,9 +3,14 @@ import type MultiSyncPlugin from "../main";
 import { requestDeviceCode, pollForToken } from "../auth/github-device";
 import { getAuthenticatedUser } from "../github/api";
 import { CLIENT_ID } from "../constants";
+import { t, getLang, setLang, Lang } from "../i18n";
+
+type CommitInfo = { oid: string; message: string; timestamp: number };
 
 export class MultiSyncSettingsTab extends PluginSettingTab {
   plugin: MultiSyncPlugin;
+  private termHistory: string[] = [];
+  private termHistoryIdx = -1;
 
   constructor(app: App, plugin: MultiSyncPlugin) {
     super(app, plugin);
@@ -15,21 +20,35 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "MultiSync Settings" });
+
+    // Header with language toggle in the top-right corner
+    const header = containerEl.createDiv({ cls: "multisync-header" });
+    header.createEl("h2", { text: t("settingsTitle") });
+    const langBtn = header.createEl("button", {
+      text: getLang().toUpperCase(),
+      cls: "multisync-lang",
+    });
+    langBtn.addEventListener("click", async () => {
+      const next: Lang = getLang() === "en" ? "ru" : "en";
+      this.plugin.settings.language = next;
+      setLang(next);
+      await this.plugin.saveSettings();
+      this.plugin.setStatus("idle");
+      this.display();
+    });
 
     const settings = this.plugin.settings;
 
     // ── Account section ──────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "GitHub Account" });
+    containerEl.createEl("h3", { text: t("ghAccount") });
 
     if (settings.githubToken && settings.githubUsername) {
-      // Connected state
       new Setting(containerEl)
-        .setName("Connected account")
-        .setDesc(`Signed in as @${settings.githubUsername}`)
+        .setName(t("connectedAccount"))
+        .setDesc(`${t("signedInAs")} @${settings.githubUsername}`)
         .addButton((btn) =>
           btn
-            .setButtonText("Disconnect")
+            .setButtonText(t("disconnect"))
             .setWarning()
             .onClick(async () => {
               settings.githubToken = "";
@@ -37,23 +56,20 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
               settings.repoName = "";
               await this.plugin.saveSettings();
               this.display();
-              new Notice("Disconnected from GitHub.");
+              new Notice(t("disconnectedNotice"));
             })
         );
 
       new Setting(containerEl)
-        .setName("Vault repo")
+        .setName(t("vaultRepo"))
         .setDesc(`github.com/${settings.githubUsername}/${settings.repoName}`);
     } else {
-      // Disconnected state
       new Setting(containerEl)
-        .setName("Connect GitHub account")
-        .setDesc(
-          "Authorise MultiSync to access your private repos. Opens a browser window."
-        )
+        .setName(t("connectName"))
+        .setDesc(t("connectDesc"))
         .addButton((btn) => {
           btn
-            .setButtonText("Connect GitHub")
+            .setButtonText(t("connectBtn"))
             .setCta()
             .onClick(async () => {
               await this.startDeviceFlow(btn);
@@ -62,11 +78,11 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
     }
 
     // ── Sync options ──────────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Sync Options" });
+    containerEl.createEl("h3", { text: t("syncOptions") });
 
     new Setting(containerEl)
-      .setName("Auto-sync")
-      .setDesc("Automatically sync when files are modified.")
+      .setName(t("autoSync"))
+      .setDesc(t("autoSyncDesc"))
       .addToggle((toggle) =>
         toggle.setValue(settings.autoSync).onChange(async (val) => {
           settings.autoSync = val;
@@ -75,8 +91,8 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Sync debounce (ms)")
-      .setDesc("Wait this many milliseconds after the last edit before syncing.")
+      .setName(t("debounce"))
+      .setDesc(t("debounceDesc"))
       .addSlider((slider) =>
         slider
           .setLimits(1000, 10000, 500)
@@ -89,8 +105,8 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Excluded patterns")
-      .setDesc("One pattern per line. These files will never be synced.")
+      .setName(t("excluded"))
+      .setDesc(t("excludedDesc"))
       .addTextArea((ta) =>
         ta
           .setValue(settings.excludePatterns.join("\n"))
@@ -104,28 +120,219 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       );
 
     // ── Manual sync ───────────────────────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Manual Sync" });
+    containerEl.createEl("h3", { text: t("manualSync") });
 
     new Setting(containerEl)
-      .setName("Sync now")
-      .setDesc("Immediately push all local changes and pull remote changes.")
+      .setName(t("syncNow"))
+      .setDesc(t("syncNowDesc"))
       .addButton((btn) =>
-        btn.setButtonText("Sync Now").onClick(async () => {
+        btn.setButtonText(t("syncNowBtn")).onClick(async () => {
           await this.plugin.triggerManualSync();
         })
       );
 
-    // ── Last sync time ────────────────────────────────────────────────────────
     if (settings.lastSyncTime > 0) {
       const lastSync = new Date(settings.lastSyncTime).toLocaleString();
       containerEl.createEl("p", {
-        text: `Last synced: ${lastSync}`,
+        text: `${t("lastSynced")}: ${lastSync}`,
         cls: "setting-item-description",
       });
     }
 
     this.displayAdvancedSection(containerEl);
+
+    if (this.plugin.gitSync) {
+      // Fire and forget — history loads async below the fold
+      void this.displayHistory(containerEl);
+      this.displayTerminal(containerEl);
+    }
   }
+
+  // ══ Sync history heatmap ═══════════════════════════════════════════════════
+
+  private async displayHistory(containerEl: HTMLElement): Promise<void> {
+    const section = containerEl.createDiv({ cls: "multisync-history" });
+    section.createEl("h3", { text: t("history") });
+
+    const commits = await this.plugin.gitSync!.recentCommits(1000);
+    if (commits.length === 0) {
+      section.createEl("p", { text: t("historyEmpty"), cls: "setting-item-description" });
+      return;
+    }
+
+    // Group commits by local date
+    const dayKey = (ts: number) => {
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+    const byDay = new Map<string, CommitInfo[]>();
+    for (const c of commits) {
+      const key = dayKey(c.timestamp);
+      (byDay.get(key) ?? byDay.set(key, []).get(key)!).push(c);
+    }
+
+    // Build a 26-week grid ending today, columns = weeks, rows = Mon..Sun
+    const grid = section.createDiv({ cls: "multisync-heatmap" });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const end = new Date(today);
+    const start = new Date(today);
+    start.setDate(start.getDate() - 26 * 7 + 1);
+    // Align start to Monday
+    while (start.getDay() !== 1) start.setDate(start.getDate() - 1);
+
+    const detail = section.createDiv({ cls: "multisync-day-detail" });
+    detail.createEl("p", { text: t("pickDay"), cls: "setting-item-description" });
+
+    let selected: HTMLElement | null = null;
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const key = dayKey(d.getTime());
+      const dayCommits = byDay.get(key) ?? [];
+      const n = dayCommits.length;
+      const level = n === 0 ? 0 : n === 1 ? 1 : n <= 3 ? 2 : n <= 7 ? 3 : 4;
+      const cell = grid.createDiv({ cls: "multisync-cell" });
+      cell.setAttribute("data-level", String(level));
+      cell.setAttribute("title", `${key} · ${n} ${t("syncsWord")}`);
+      cell.addEventListener("click", () => {
+        selected?.removeClass("is-selected");
+        selected = cell;
+        cell.addClass("is-selected");
+        this.renderDayCommits(detail, key, dayCommits);
+      });
+    }
+  }
+
+  private renderDayCommits(detail: HTMLElement, day: string, commits: CommitInfo[]): void {
+    detail.empty();
+    detail.createEl("h4", { text: day });
+    if (commits.length === 0) {
+      detail.createEl("p", { text: t("noCommitsThisDay"), cls: "setting-item-description" });
+      return;
+    }
+    for (const c of commits) {
+      const row = detail.createDiv({ cls: "multisync-commit-row" });
+      const time = new Date(c.timestamp).toLocaleTimeString().slice(0, 5);
+      row.createSpan({ cls: "multisync-commit-time", text: time });
+      row.createSpan({ cls: "multisync-commit-msg", text: c.message });
+      row.createSpan({ cls: "multisync-commit-sha", text: c.oid.slice(0, 7) });
+      const btn = row.createEl("button", { text: t("restore"), cls: "multisync-restore" });
+      btn.addEventListener("click", async () => {
+        if (!window.confirm(t("restoreConfirm"))) return;
+        btn.setText(t("restoring"));
+        btn.disabled = true;
+        try {
+          await this.plugin.gitSync!.restoreCommit(c.oid);
+          this.plugin.settings.lastSyncTime = Date.now();
+          await this.plugin.saveSettings();
+          this.plugin.setStatus("idle");
+          new Notice(t("restored"));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          new Notice(`${t("restoreFailed")}: ${msg}`);
+        }
+        btn.setText(t("restore"));
+        btn.disabled = false;
+      });
+    }
+  }
+
+  // ══ Git console ════════════════════════════════════════════════════════════
+
+  private displayTerminal(containerEl: HTMLElement): void {
+    const section = containerEl.createDiv({ cls: "multisync-term-section" });
+    section.createEl("h3", { text: t("terminal") });
+
+    const term = section.createDiv({ cls: "multisync-term" });
+
+    // Quick actions row
+    const actions = term.createDiv({ cls: "multisync-term-actions" });
+    const out = term.createDiv({ cls: "multisync-term-out" });
+
+    const print = (text: string, cls?: string) => {
+      for (const line of text.split("\n")) {
+        out.createDiv({ cls: `multisync-term-line ${cls ?? ""}`, text: line });
+      }
+      out.scrollTop = out.scrollHeight;
+    };
+
+    const run = async (raw: string) => {
+      const cmd = raw.trim().replace(/^git\s+/, "");
+      if (!cmd) return;
+      print(`❯ ${cmd}`, "is-cmd");
+      const g = this.plugin.gitSync!;
+      const [name, ...args] = cmd.split(/\s+/);
+      try {
+        switch (name) {
+          case "help":     print(t("termHelp")); break;
+          case "clear":    out.empty(); break;
+          case "status": { const s = await g.statusText(); print(s || t("clean")); break; }
+          case "log": {
+            const n = Math.min(parseInt(args[0] ?? "10", 10) || 10, 50);
+            const commits = await g.recentCommits(n);
+            print(commits.map((c) =>
+              `${c.oid.slice(0, 7)}  ${new Date(c.timestamp).toLocaleString()}  ${c.message}`
+            ).join("\n") || t("historyEmpty"));
+            break;
+          }
+          case "branch":   print(await g.listBranchesText()); break;
+          case "checkout": if (args[0]) { await g.checkoutRef(args[0]); print(`→ ${args[0]}`); } break;
+          case "restore":  if (args[0]) { await g.restoreCommit(args[0]); print(t("restored")); } break;
+          case "sync":     await this.plugin.triggerManualSync(); print("✓"); break;
+          case "pull":     await g.pull(); print("✓"); break;
+          case "push":     await g.pushNow(); print("✓"); break;
+          case "remote":   print(g.getRemoteUrl()); break;
+          default:         print(t("termUnknown"), "is-err");
+        }
+      } catch (err) {
+        print(err instanceof Error ? err.message : String(err), "is-err");
+      }
+    };
+
+    for (const [label, cmd] of [
+      [t("syncNowBtn"), "sync"],
+      ["Pull", "pull"],
+      ["Push", "push"],
+      [t("branches"), "branch"],
+      ["Log", "log"],
+      ["Status", "status"],
+    ] as [string, string][]) {
+      const chip = actions.createEl("button", { text: label, cls: "multisync-term-chip" });
+      chip.addEventListener("click", () => void run(cmd));
+    }
+
+    // Prompt line
+    const promptRow = term.createDiv({ cls: "multisync-term-prompt" });
+    promptRow.createSpan({ text: "❯", cls: "multisync-term-caret" });
+    const input = promptRow.createEl("input", { type: "text", cls: "multisync-term-input" });
+    input.placeholder = t("termPlaceholder");
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        const value = input.value;
+        input.value = "";
+        if (value.trim()) {
+          this.termHistory.push(value);
+          this.termHistoryIdx = this.termHistory.length;
+        }
+        void run(value);
+      } else if (e.key === "ArrowUp") {
+        if (this.termHistoryIdx > 0) {
+          this.termHistoryIdx--;
+          input.value = this.termHistory[this.termHistoryIdx] ?? "";
+        }
+        e.preventDefault();
+      } else if (e.key === "ArrowDown") {
+        if (this.termHistoryIdx < this.termHistory.length) {
+          this.termHistoryIdx++;
+          input.value = this.termHistory[this.termHistoryIdx] ?? "";
+        }
+        e.preventDefault();
+      }
+    });
+
+    print(t("termHelp"));
+  }
+
+  // ══ Advanced access ════════════════════════════════════════════════════════
 
   /**
    * Collapsed by default so the main UI stays minimal. Lets the user avoid
@@ -136,18 +343,13 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
     const settings = this.plugin.settings;
 
     const details = containerEl.createEl("details", { cls: "multisync-advanced" });
-    details.createEl("summary", { text: "Advanced: use your own access" });
+    details.createEl("summary", { text: t("advanced") });
 
-    // Own OAuth app
     new Setting(details)
-      .setName("Custom OAuth Client ID")
-      .setDesc(
-        "Use your own GitHub OAuth app for the Connect button instead of the " +
-        "built-in one. Create it at github.com/settings/developers and tick " +
-        "\"Enable Device Flow\" in the app settings. Leave empty for the default."
-      )
-      .addText((t) =>
-        t
+      .setName(t("clientId"))
+      .setDesc(t("clientIdDesc"))
+      .addText((el) =>
+        el
           .setPlaceholder(CLIENT_ID)
           .setValue(settings.customClientId)
           .onChange(async (val) => {
@@ -156,52 +358,47 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
           })
       );
 
-    // Personal access token
     let patValue = "";
     new Setting(details)
-      .setName("Personal Access Token")
-      .setDesc(
-        "Connect with a token instead of OAuth — no third-party app, and access " +
-        "can be limited to a single repo. Create a fine-grained token at " +
-        "github.com/settings/personal-access-tokens with Contents read/write on " +
-        "your vault repo (the repo must already exist), or use a classic token " +
-        "with the \"repo\" scope."
-      )
-      .addText((t) => {
-        t.inputEl.type = "password";
-        t.setPlaceholder("github_pat_… / ghp_…").onChange((val) => {
+      .setName(t("pat"))
+      .setDesc(t("patDesc"))
+      .addText((el) => {
+        el.inputEl.type = "password";
+        el.setPlaceholder("github_pat_… / ghp_…").onChange((val) => {
           patValue = val.trim();
         });
       })
       .addButton((btn) =>
         btn
-          .setButtonText("Connect")
+          .setButtonText(t("connect"))
           .setCta()
           .onClick(async () => {
             if (!patValue) {
-              new Notice("Paste a token first.");
+              new Notice(t("pasteToken"));
               return;
             }
-            btn.setButtonText("Connecting…").setDisabled(true);
+            btn.setButtonText(t("connectingBtn")).setDisabled(true);
             try {
               const user = await getAuthenticatedUser(patValue);
               this.plugin.settings.githubToken    = patValue;
               this.plugin.settings.githubUsername = user.login;
               await this.plugin.initializeRepo(patValue, user.login);
               await this.plugin.saveSettings();
-              new Notice(`Connected as @${user.login} via token.`);
+              new Notice(`${t("tokenConnected")} @${user.login}.`);
               this.display();
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
-              new Notice(`Token connection failed: ${msg}`);
-              btn.setButtonText("Connect").setDisabled(false);
+              new Notice(`${t("tokenFailed")}: ${msg}`);
+              btn.setButtonText(t("connect")).setDisabled(false);
             }
           })
       );
   }
 
+  // ══ Device flow ════════════════════════════════════════════════════════════
+
   private async startDeviceFlow(btn: ButtonComponent): Promise<void> {
-    btn.setButtonText("Connecting…").setDisabled(true);
+    btn.setButtonText(t("connectingBtn")).setDisabled(true);
 
     const clientId = this.plugin.settings.customClientId || CLIENT_ID;
 
@@ -213,9 +410,7 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       modal.style.cssText =
         "background:var(--background-secondary);border-radius:8px;padding:16px;" +
         "margin-top:12px;text-align:center;";
-      modal.createEl("p", {
-        text: "Open this URL in your browser and enter the code below:",
-      });
+      modal.createEl("p", { text: t("openUrl") });
       const link = modal.createEl("a", {
         text: deviceFlow.verification_uri,
         href: deviceFlow.verification_uri,
@@ -236,24 +431,24 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       const copyCode = async () => {
         try {
           await navigator.clipboard.writeText(deviceFlow.user_code);
-          new Notice("Code copied to clipboard.");
+          new Notice(t("codeCopied"));
         } catch {
-          new Notice("Could not copy — select the code manually.");
+          new Notice(t("copyFailed"));
         }
       };
-      codeEl.title = "Click to copy";
+      codeEl.title = t("clickToCopy");
       codeEl.addEventListener("click", copyCode);
 
-      const copyBtn = modal.createEl("button", { text: "Copy code" });
+      const copyBtn = modal.createEl("button", { text: t("copyCode") });
       copyBtn.addEventListener("click", copyCode);
 
       modal.createEl("p", {
-        text: "Waiting for you to approve in the browser…",
+        text: t("waiting"),
         cls: "setting-item-description",
       });
 
       // Restore button so the user can cancel / retry while waiting
-      btn.setButtonText("Cancel").setDisabled(false);
+      btn.setButtonText(t("cancel")).setDisabled(false);
 
       // Open browser automatically
       window.open(deviceFlow.verification_uri, "_blank");
@@ -278,14 +473,14 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
       await this.plugin.initializeRepo(token, user.login);
 
       await this.plugin.saveSettings();
-      new Notice(`Connected as @${user.login}. Vault syncing started!`);
+      new Notice(`${t("connectedAs")} @${user.login}. ${t("syncStarted")}`);
       this.display();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Remove the code panel if it's still visible
       this.containerEl.querySelector(".multisync-device-modal")?.remove();
-      new Notice(`Connection failed: ${msg}`);
-      btn.setButtonText("Connect GitHub").setDisabled(false);
+      new Notice(`${t("connectionFailed")}: ${msg}`);
+      btn.setButtonText(t("connectBtn")).setDisabled(false);
     }
   }
 }

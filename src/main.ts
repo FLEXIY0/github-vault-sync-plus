@@ -6,15 +6,17 @@ import { ConflictModal } from "./ui/conflict-modal";
 import { GitSync } from "./sync/git-sync";
 import { SyncQueue } from "./sync/queue";
 import { repoExists, createRepo, vaultNameToRepoName } from "./github/api";
+import { t, setLang, detectLang } from "./i18n";
 
 export default class MultiSyncPlugin extends Plugin {
   settings!: PluginSettings;
   private statusBar!: StatusBarItem;
-  private gitSync: GitSync | null = null;
+  gitSync: GitSync | null = null;
   private syncQueue: SyncQueue | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    setLang(this.settings.language || detectLang());
 
     this.statusBar = new StatusBarItem(this, () => this.settings.lastSyncTime);
     this.statusBar.onClick(() => this.triggerManualSync());
@@ -131,17 +133,13 @@ export default class MultiSyncPlugin extends Plugin {
     const exists      = await repoExists(token, username, repoName);
     const alreadyInit = await sync.isInitialized();
 
-    const allFiles = () =>
-      this.app.vault
-        .getFiles()
-        .map((f) => f.path)
-        .filter((p) => !this.isExcluded(p));
+    const allFiles = () => [...this.syncableFiles(), ...this.selfSyncFiles()];
 
     if (!exists) {
       // Brand-new vault — create repo and push everything
       await createRepo(token, repoName, `Obsidian vault: ${vaultName}`);
       await sync.initAndPush(allFiles());
-      new Notice(`Created private repo: ${username}/${repoName}`);
+      new Notice(`${t("createdRepo")}: ${username}/${repoName}`);
     } else if (!alreadyInit) {
       // Repo exists remotely, this is a new device — clone it.
       // clone() returns false when the remote is empty (a previous initAndPush
@@ -150,15 +148,15 @@ export default class MultiSyncPlugin extends Plugin {
       const cloneHadCommits = await sync.clone();
       if (!cloneHadCommits) {
         await sync.initAndPush(allFiles());
-        new Notice(`Initialised repo: ${username}/${repoName}`);
+        new Notice(`${t("initialisedRepo")}: ${username}/${repoName}`);
       } else {
-        new Notice(`Cloned repo: ${username}/${repoName}`);
+        new Notice(`${t("clonedRepo")}: ${username}/${repoName}`);
       }
     } else {
       // Already initialised locally — ensure remote URL is current, then reconnect.
       // Also handles the case where a previous push was interrupted (local branch
       // exists but remote is empty): ensureLocalBranch will push on next sync.
-      new Notice(`Reconnected to: ${username}/${repoName}`);
+      new Notice(`${t("reconnected")}: ${username}/${repoName}`);
     }
 
     this.settings.lastSyncTime = Date.now();
@@ -193,22 +191,36 @@ export default class MultiSyncPlugin extends Plugin {
     });
   }
 
+  /** Vault files eligible for sync */
+  private syncableFiles(): string[] {
+    return this.app.vault
+      .getFiles()
+      .map((f) => f.path)
+      .filter((p) => !this.isExcluded(p));
+  }
+
+  /**
+   * The plugin's own files, synced through the vault repo so other devices
+   * (including mobile) receive plugin updates automatically with the notes.
+   */
+  private selfSyncFiles(): string[] {
+    const dir = this.manifest.dir;
+    if (!dir) return [];
+    return [`${dir}/main.js`, `${dir}/manifest.json`, `${dir}/styles.css`];
+  }
+
   async triggerManualSync(): Promise<void> {
     if (!this.gitSync) {
-      new Notice(
-        "MultiSync: not connected. Please connect your GitHub account in settings."
-      );
+      new Notice(t("notConnected"));
       return;
     }
 
     this.setStatus("pulling");
     try {
-      const allFiles = this.app.vault
-        .getFiles()
-        .map((f) => f.path)
-        .filter((p) => !this.isExcluded(p));
-
-      const result = await this.gitSync.sync(allFiles);
+      const result = await this.gitSync.sync([
+        ...this.syncableFiles(),
+        ...this.selfSyncFiles(),
+      ]);
 
       if (result.conflictFiles.length > 0) {
         this.setStatus("conflict");
@@ -217,15 +229,15 @@ export default class MultiSyncPlugin extends Plugin {
         this.settings.lastSyncTime = Date.now();
         await this.saveSettings();
         this.setStatus("idle");
-        new Notice("Vault synced successfully.");
+        new Notice(t("syncedOk"));
       } else {
         this.setStatus("error", result.error);
-        new Notice(`Sync error: ${result.error}`);
+        new Notice(`${t("syncError")}: ${result.error}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.setStatus("error", msg);
-      new Notice(`Sync failed: ${msg}`);
+      new Notice(`${t("syncFailed")}: ${msg}`);
     }
   }
 

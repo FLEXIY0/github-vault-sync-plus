@@ -8,6 +8,7 @@ export interface PluginSettings {
   lastSyncTime: number;          // unix timestamp of last successful sync
   commitMessageTemplate: string; // e.g. "sync: {{datetime}}"
   customClientId: string;        // user's own OAuth app client_id ("" = built-in app)
+  language: "" | "en" | "ru";    // UI language ("" = follow Obsidian's language)
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -24,6 +25,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   lastSyncTime: 0,
   commitMessageTemplate: "sync: {{datetime}}",
   customClientId: "",
+  language: "",
 };
 
 export interface DeviceFlowResponse {
