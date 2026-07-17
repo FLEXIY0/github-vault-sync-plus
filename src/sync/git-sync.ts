@@ -345,6 +345,8 @@ export class GitSync {
     let skippedDeletions = 0;
 
     try {
+      await this.ensureRepoIntegrity();
+
       // Kick off the remote-head check now so the network roundtrip overlaps
       // with the local staging work below.
       const remoteShaPromise = this.remoteHead();
@@ -541,6 +543,7 @@ export class GitSync {
    * Uses explicit fetch + merge (not git.pull) for consistent error handling.
    */
   async pull(): Promise<void> {
+    await this.ensureRepoIntegrity();
     if (!(await this.hasLocalBranch())) return;
 
     // Cheap remote-head check first — most opens have nothing new to pull
@@ -567,6 +570,35 @@ export class GitSync {
       });
     }
     this.report(100, "done");
+  }
+
+  /**
+   * Self-heal a corrupted .git: an empty/missing HEAD or config (seen after
+   * interrupted writes) makes every git command fail with cryptic TypeErrors.
+   */
+  private async ensureRepoIntegrity(): Promise<void> {
+    try {
+      const head = await this.fs.promises
+        .readFile(`${this.dir}/.git/HEAD`, { encoding: "utf8" })
+        .catch(() => "");
+      if (!(head as string).trim()) {
+        await this.fs.promises.writeFile(
+          `${this.dir}/.git/HEAD`,
+          `ref: refs/heads/${DEFAULT_BRANCH}\n`
+        );
+      }
+    } catch { /* .git may not exist yet — init/clone will create it */ }
+    try {
+      const url = await git
+        .getConfig({ fs: this.fs, dir: this.dir, path: "remote.origin.url" })
+        .catch(() => undefined);
+      if (url !== this.remoteUrl) {
+        try { await git.deleteRemote({ fs: this.fs, dir: this.dir, remote: "origin" }); } catch { /* none */ }
+        try {
+          await git.addRemote({ fs: this.fs, dir: this.dir, remote: "origin", url: this.remoteUrl });
+        } catch { /* not a repo yet */ }
+      }
+    } catch { /* ignore */ }
   }
 
   /** Point origin at the current remote URL and drop stale tracking state */
