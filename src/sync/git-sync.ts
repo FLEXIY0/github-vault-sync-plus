@@ -5,6 +5,7 @@ import {
   GIT_AUTHOR_NAME,
   GIT_AUTHOR_EMAIL,
   DEFAULT_BRANCH,
+  GITHUB_API_BASE,
 } from "../constants";
 import { ConflictFile, SyncResult } from "../types";
 
@@ -62,7 +63,20 @@ export class GitSync {
   private dir: string;
   private token: string;
   private username: string;
+  private repoName: string;
   private remoteUrl: string;
+
+  /**
+   * Shared isomorphic-git object cache. Git objects are content-addressed and
+   * immutable, so reusing one cache across all operations is safe and avoids
+   * re-reading/re-parsing .git on every command — a large win on mobile where
+   * each fs call crosses into native code.
+   */
+  private cache: Record<string, unknown> = {};
+
+  // Lightweight remote-head check state (ETag lets GitHub answer 304 for free)
+  private branchEtag: string | null = null;
+  private lastRemoteSha: string | null = null;
 
   /** Optional UI progress hook — safe to leave unset */
   onProgress: ProgressReporter | null = null;
@@ -97,6 +111,7 @@ export class GitSync {
     this.dir = vaultPath;
     this.token = token;
     this.username = username;
+    this.repoName = repoName;
     this.remoteUrl = `https://github.com/${username}/${repoName}.git`;
   }
 
@@ -106,8 +121,52 @@ export class GitSync {
       fs: this.fs,
       http: gitHttp,
       dir: this.dir,
+      cache: this.cache,
       author: { name: GIT_AUTHOR_NAME, email: GIT_AUTHOR_EMAIL },
     };
+  }
+
+  /** resolveRef that returns null instead of throwing */
+  private async resolveSafe(ref: string): Promise<string | null> {
+    try {
+      return await git.resolveRef({ fs: this.fs, dir: this.dir, ref });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Asks the GitHub API for the remote branch head SHA — one tiny request
+   * instead of a full git fetch negotiation. Uses ETag so an unchanged branch
+   * answers 304 (which doesn't count against the API rate limit).
+   * Returns null when the answer is unknown (offline, 404, etc.) — callers
+   * must fall back to a real fetch in that case.
+   */
+  private async remoteHead(): Promise<string | null> {
+    try {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${this.token}`,
+        Accept: "application/vnd.github+json",
+      };
+      if (this.branchEtag) headers["If-None-Match"] = this.branchEtag;
+
+      const resp = await requestUrl({
+        url: `${GITHUB_API_BASE}/repos/${this.username}/${this.repoName}/branches/${DEFAULT_BRANCH}`,
+        method: "GET",
+        headers,
+        throw: false,
+      });
+
+      if (resp.status === 304) return this.lastRemoteSha;
+      if (resp.status !== 200) return null;
+
+      this.branchEtag = resp.headers["etag"] ?? resp.headers["ETag"] ?? null;
+      const body = resp.json as { commit?: { sha?: string } };
+      this.lastRemoteSha = body.commit?.sha ?? null;
+      return this.lastRemoteSha;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -197,16 +256,24 @@ export class GitSync {
       await git.init({ fs: this.fs, dir: this.dir, defaultBranch: DEFAULT_BRANCH });
     }
 
-    // Stage all vault files (skip any that fail)
-    let staged = 0;
-    for (const file of vaultFiles) {
+    // Stage all vault files — batch first, per-file fallback so one bad file
+    // doesn't block the rest
+    if (vaultFiles.length > 0) {
       try {
-        await git.add({ fs: this.fs, dir: this.dir, filepath: file });
+        await git.add({ ...this.gitOpts(), filepath: vaultFiles });
+        this.report(40, "stage");
       } catch {
-        // Skip un-stageable files (binary, permission issues, etc.)
+        let staged = 0;
+        for (const file of vaultFiles) {
+          try {
+            await git.add({ ...this.gitOpts(), filepath: file });
+          } catch {
+            // Skip un-stageable files (binary, permission issues, etc.)
+          }
+          staged++;
+          this.report((staged / vaultFiles.length) * 40, "stage");
+        }
       }
-      staged++;
-      this.report((staged / vaultFiles.length) * 40, "stage");
     }
 
     const localBranchExists = await this.hasLocalBranch();
@@ -265,33 +332,68 @@ export class GitSync {
     const conflicts: ConflictFile[] = [];
 
     try {
-      // ── 1. Stage ─────────────────────────────────────────────────────────────
+      // Kick off the remote-head check now so the network roundtrip overlaps
+      // with the local staging work below.
+      const remoteShaPromise = this.remoteHead();
+
+      // ── 1. Scan + stage ──────────────────────────────────────────────────────
       // Overall progress budget: stage 0-30, commit 30-35, fetch 35-60,
       // merge 60-70, conflict scan 70-75, push 75-100.
-      let staged = 0;
-      for (const file of changedFiles) {
-        try {
-          await git.add({ fs: this.fs, dir: this.dir, filepath: file });
-        } catch {
-          try {
-            await git.remove({ fs: this.fs, dir: this.dir, filepath: file });
-          } catch { /* skip */ }
+      // One statusMatrix limited to the changed files drives both staging and
+      // the dirty check — instead of hashing the whole vault twice.
+      let toAdd: string[] = [];
+      let toRemove: string[] = [];
+      let scanned = true;
+      try {
+        const matrix = await git.statusMatrix({
+          ...this.gitOpts(),
+          filepaths: changedFiles.length > 0 ? changedFiles : undefined,
+        });
+        for (const [filepath, head, workdir, stage] of matrix) {
+          if (head === 1 && workdir === 1 && stage === 1) continue; // unmodified
+          if (workdir === 0) toRemove.push(filepath);
+          else toAdd.push(filepath);
         }
+      } catch {
+        // statusMatrix can throw on an unborn branch — stage everything we were given
+        scanned = false;
+        toAdd = changedFiles;
+        toRemove = [];
+      }
+
+      const totalOps = toAdd.length + toRemove.length;
+      let staged = 0;
+      if (toAdd.length > 0) {
+        try {
+          // Batch add — one index rewrite instead of one per file
+          await git.add({ ...this.gitOpts(), filepath: toAdd });
+          staged += toAdd.length;
+          this.report((staged / totalOps) * 30, "stage");
+        } catch {
+          // Fall back to per-file staging so one bad file doesn't block the rest
+          for (const file of toAdd) {
+            try {
+              await git.add({ ...this.gitOpts(), filepath: file });
+            } catch {
+              try {
+                await git.remove({ ...this.gitOpts(), filepath: file });
+              } catch { /* skip */ }
+            }
+            staged++;
+            this.report((staged / totalOps) * 30, "stage");
+          }
+        }
+      }
+      for (const file of toRemove) {
+        try {
+          await git.remove({ ...this.gitOpts(), filepath: file });
+        } catch { /* untracked — nothing to remove */ }
         staged++;
-        this.report((staged / changedFiles.length) * 30, "stage");
+        this.report((staged / totalOps) * 30, "stage");
       }
 
       // ── 2. Commit if dirty ───────────────────────────────────────────────────
-      // Wrap statusMatrix: some isomorphic-git versions throw on an unborn branch.
-      let hasDirty: boolean;
-      try {
-        const matrix = await git.statusMatrix({ fs: this.fs, dir: this.dir });
-        hasDirty = matrix.some(([, h, w, s]) => h !== 1 || w !== 1 || s !== 1);
-      } catch {
-        // Fall back: assume dirty when files were changed
-        hasDirty = changedFiles.length > 0;
-      }
-
+      const hasDirty = scanned ? totalOps > 0 : changedFiles.length > 0;
       if (hasDirty) {
         this.report(30, "commit");
         const now = new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -302,38 +404,55 @@ export class GitSync {
         // refs/heads/main is now guaranteed to exist
       }
 
-      // ── 3. Fetch ─────────────────────────────────────────────────────────────
-      this.report(35, "fetch");
-      const fetchHead = await this.safeFetch(this.netProgress(35, 25));
+      // ── 3. Fetch — skipped when the remote hasn't moved ─────────────────────
+      this.report(35, "check remote");
+      const remoteSha  = await remoteShaPromise;
+      const localHead  = await this.resolveSafe(DEFAULT_BRANCH);
+      const originMain = await this.resolveSafe(`refs/remotes/origin/${DEFAULT_BRANCH}`);
 
-      // ── 4. Merge ─────────────────────────────────────────────────────────────
+      let fetchHead: string | null = null;
+      if (remoteSha && (remoteSha === localHead || remoteSha === originMain)) {
+        // Remote head is something we already have — no fetch, no merge needed
+        this.report(70, "up to date");
+      } else {
+        fetchHead = await this.safeFetch(this.netProgress(35, 25));
+      }
+
+      // ── 4. Merge — a conflict throws MergeConflictError with the file list ──
+      let merged = false;
       if (fetchHead && (await this.hasLocalBranch())) {
-        const localHead = await git.resolveRef({
-          fs: this.fs,
-          dir: this.dir,
-          ref: DEFAULT_BRANCH,
-        });
-
-        if (fetchHead !== localHead) {
+        const head = await this.resolveSafe(DEFAULT_BRANCH);
+        if (fetchHead !== head) {
           this.report(60, "merge");
-          await git.merge({
-            fs: this.fs,
-            dir: this.dir,
-            ours: DEFAULT_BRANCH,
-            theirs: fetchHead,
-            author: { name: GIT_AUTHOR_NAME, email: GIT_AUTHOR_EMAIL },
-            message: "sync: merge remote changes",
-            fastForwardOnly: false,
-          });
+          try {
+            await git.merge({
+              ...this.gitOpts(),
+              ours: DEFAULT_BRANCH,
+              theirs: fetchHead,
+              message: "sync: merge remote changes",
+              fastForwardOnly: false,
+            });
+            merged = true;
+          } catch (err) {
+            if (err instanceof git.Errors.MergeConflictError) {
+              for (const filepath of err.data.filepaths) {
+                const ours   = await this.readFileContent(filepath);
+                const theirs = await this.readRemoteFileContent(filepath);
+                conflicts.push({ path: filepath, ours, theirs });
+              }
+            } else {
+              throw err;
+            }
+          }
         }
       }
 
-      // ── 5. Detect conflicts ──────────────────────────────────────────────────
-      this.report(70, "check");
-      if (await this.hasLocalBranch()) {
-        const statusAfter = await git.statusMatrix({ fs: this.fs, dir: this.dir });
-        for (const [filepath, head, workdir, stage] of statusAfter) {
-          if (stage === 2 || (head === 0 && workdir === 2 && stage === 0)) {
+      // ── 5. Double-check for unmerged index entries after a clean merge ──────
+      if (merged && conflicts.length === 0 && (await this.hasLocalBranch())) {
+        this.report(70, "check");
+        const statusAfter = await git.statusMatrix(this.gitOpts());
+        for (const [filepath, , , stage] of statusAfter) {
+          if (stage === 2) {
             const ours   = await this.readFileContent(filepath);
             const theirs = await this.readRemoteFileContent(filepath);
             conflicts.push({ path: filepath, ours, theirs });
@@ -341,14 +460,22 @@ export class GitSync {
         }
       }
 
-      // ── 6. Push ──────────────────────────────────────────────────────────────
+      // ── 6. Push — skipped when the remote is already at our head ────────────
       if (conflicts.length === 0 && (await this.hasLocalBranch())) {
-        this.report(75, "push");
-        await git.push({
-          ...this.netOpts(),
-          ref: DEFAULT_BRANCH,
-          onProgress: this.netProgress(75, 25),
-        });
+        const headAfter = await this.resolveSafe(DEFAULT_BRANCH);
+        if (remoteSha && headAfter && headAfter === remoteSha) {
+          // Nothing new locally and remote is identical — skip the roundtrip
+        } else {
+          this.report(75, "push");
+          await git.push({
+            ...this.netOpts(),
+            ref: DEFAULT_BRANCH,
+            onProgress: this.netProgress(75, 25),
+          });
+          // Remote now points at our head; remember it and drop the stale ETag
+          this.lastRemoteSha = headAfter;
+          this.branchEtag = null;
+        }
       }
 
       this.report(100, "done");
@@ -363,7 +490,7 @@ export class GitSync {
   async resolveConflict(filepath: string, resolvedContent: string): Promise<void> {
     const fullPath = `${this.dir}/${filepath}`;
     await this.fs.promises.writeFile(fullPath, resolvedContent);
-    await git.add({ fs: this.fs, dir: this.dir, filepath });
+    await git.add({ ...this.gitOpts(), filepath });
     await git.commit({
       ...this.gitOpts(),
       message: `sync: resolve conflict in ${filepath}`,
@@ -381,24 +508,25 @@ export class GitSync {
   async pull(): Promise<void> {
     if (!(await this.hasLocalBranch())) return;
 
-    this.report(undefined, "fetch");
+    // Cheap remote-head check first — most opens have nothing new to pull
+    this.report(undefined, "check remote");
+    const remoteSha  = await this.remoteHead();
+    const localHead  = await this.resolveSafe(DEFAULT_BRANCH);
+    const originMain = await this.resolveSafe(`refs/remotes/origin/${DEFAULT_BRANCH}`);
+    if (remoteSha && (remoteSha === localHead || remoteSha === originMain)) {
+      this.report(100, "done");
+      return;
+    }
+
     const fetchHead = await this.safeFetch(this.netProgress(0, 70));
     if (!fetchHead) return;
-
-    const localHead = await git.resolveRef({
-      fs: this.fs,
-      dir: this.dir,
-      ref: DEFAULT_BRANCH,
-    });
 
     if (fetchHead !== localHead) {
       this.report(80, "merge");
       await git.merge({
-        fs: this.fs,
-        dir: this.dir,
+        ...this.gitOpts(),
         ours: DEFAULT_BRANCH,
         theirs: fetchHead,
-        author: { name: GIT_AUTHOR_NAME, email: GIT_AUTHOR_EMAIL },
         message: "sync: merge remote changes",
         fastForwardOnly: false,
       });

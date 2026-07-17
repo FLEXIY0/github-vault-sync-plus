@@ -26,7 +26,13 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
   function rel(absPath: string): string {
     const normalized = absPath.replace(/\\/g, "/");
     const base = vaultPath.replace(/\\/g, "/").replace(/\/$/, "");
-    if (normalized.startsWith(base + "/")) {
+    // The vault root itself (isomorphic-git walkers readdir/stat it) must map
+    // to Obsidian's root path "/" — otherwise directory walks silently fail
+    // and statusMatrix sees an empty vault.
+    if (normalized === base || normalized === "" || normalized === "/") {
+      return "/";
+    }
+    if (base && normalized.startsWith(base + "/")) {
       return normalized.slice(base.length + 1);
     }
     return normalized;
