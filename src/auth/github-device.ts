@@ -53,7 +53,9 @@ export async function pollForToken(
 
       onPollStart?.();
 
-      const response = await requestUrl({
+      let response;
+      try {
+        response = await requestUrl({
         url: GITHUB_TOKEN_URL,
         method: "POST",
         headers: {
@@ -61,8 +63,13 @@ export async function pollForToken(
           "Content-Type": "application/x-www-form-urlencoded",
         },
         body: `client_id=${encodeURIComponent(clientId)}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
-        throw: false,
-      });
+          throw: false,
+        });
+      } catch {
+        // Transient network failure — keep polling until the code expires
+        setTimeout(poll, currentInterval);
+        return;
+      }
 
       const data = response.json as Record<string, string>;
 

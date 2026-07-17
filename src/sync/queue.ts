@@ -10,17 +10,19 @@ export class SyncQueue {
   private running = false;
   private gitSync: GitSync;
   private onStatus: StatusCallback;
+  private getDebounceMs: () => number;
 
-  constructor(gitSync: GitSync, onStatus: StatusCallback) {
+  constructor(gitSync: GitSync, onStatus: StatusCallback, getDebounceMs?: () => number) {
     this.gitSync = gitSync;
     this.onStatus = onStatus;
+    this.getDebounceMs = getDebounceMs ?? (() => SYNC_DEBOUNCE_MS);
   }
 
   /** Enqueue a changed file path. Debounces before triggering sync. */
   enqueue(filepath: string): void {
     this.pendingFiles.add(filepath);
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.flush(), SYNC_DEBOUNCE_MS);
+    this.debounceTimer = setTimeout(() => this.flush(), this.getDebounceMs());
   }
 
   /** Immediately drain the queue (used on vault close). */

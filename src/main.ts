@@ -160,12 +160,8 @@ export default class MultiSyncPlugin extends Plugin {
       }
     } else {
       // Already initialised locally — update remote URL if changed, then reconnect.
-      const switched = await sync.updateRemote();
-      if (switched) {
-        new Notice(`${t("reconnected")}: ${username}/${repoName}`);
-      } else {
-        new Notice(`${t("reconnected")}: ${username}/${repoName}`);
-      }
+      await sync.updateRemote();
+      new Notice(`${t("reconnected")}: ${username}/${repoName}`);
     }
 
     this.settings.lastSyncTime = Date.now();
@@ -191,13 +187,17 @@ export default class MultiSyncPlugin extends Plugin {
     );
     this.gitSync.onProgress = (pct, phase) => this.statusBar.progress(pct, phase);
 
-    this.syncQueue = new SyncQueue(this.gitSync, (status, detail) => {
-      this.setStatus(status, detail);
-      if (status === "idle") {
-        this.settings.lastSyncTime = Date.now();
-        this.saveSettings();
-      }
-    });
+    this.syncQueue = new SyncQueue(
+      this.gitSync,
+      (status, detail) => {
+        this.setStatus(status, detail);
+        if (status === "idle") {
+          this.settings.lastSyncTime = Date.now();
+          this.saveSettings();
+        }
+      },
+      () => this.settings.syncIntervalMs
+    );
   }
 
   /** Vault files eligible for sync */

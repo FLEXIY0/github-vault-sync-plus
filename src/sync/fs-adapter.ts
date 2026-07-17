@@ -57,11 +57,15 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
 
     async writeFile(path: string, data: string | Uint8Array): Promise<void> {
       const relativePath = rel(path);
-      // Ensure parent directory exists
+      // Ensure parent directories exist (level by level — Obsidian's mkdir is
+      // not guaranteed to be recursive on every platform)
       const parts = relativePath.split("/");
       if (parts.length > 1) {
-        const dir = parts.slice(0, -1).join("/");
-        try { await adapter.mkdir(dir); } catch { /* already exists */ }
+        let dirPath = "";
+        for (const part of parts.slice(0, -1)) {
+          dirPath = dirPath ? `${dirPath}/${part}` : part;
+          try { await adapter.mkdir(dirPath); } catch { /* already exists */ }
+        }
       }
       if (typeof data === "string") {
         await adapter.write(relativePath, data);
@@ -109,13 +113,16 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
         const s = await adapter.stat(rel(path));
         if (!s) throw new Error("no stat");
         const isDir = s.type !== "file";
+        // IMPORTANT: fall back to stable values, never Date.now() — unstable
+        // stats defeat isomorphic-git's index cache and force re-hashing the
+        // whole vault on every sync (very slow on mobile).
         return {
           type: isDir ? "dir" : "file",
           mode: isDir ? 0o040755 : 0o100644,
           size: s.size ?? 0,
           ino: 0,
-          mtimeMs: s.mtime ?? Date.now(),
-          ctimeMs: s.ctime ?? Date.now(),
+          mtimeMs: s.mtime ?? 0,
+          ctimeMs: s.ctime ?? s.mtime ?? 0,
           uid: 1,
           gid: 1,
           dev: 1,

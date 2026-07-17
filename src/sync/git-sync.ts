@@ -93,6 +93,19 @@ export class GitSync {
   /** Set true (temporarily) to bypass the mass-deletion guard */
   allowMassDeletion = false;
 
+  /**
+   * All mutating git operations are serialized through this promise chain.
+   * Concurrent sync/pull/restore were able to interleave writes to .git and
+   * corrupt HEAD/config/index — a mutex makes that impossible.
+   */
+  private opChain: Promise<unknown> = Promise.resolve();
+
+  private locked<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.opChain.then(fn, fn);
+    this.opChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   private report(percent: number | undefined, phase?: string): void {
     try {
       this.onProgress?.(percent, phase);
@@ -246,7 +259,11 @@ export class GitSync {
    * Clone the remote into the vault directory.
    * Returns true if the clone produced a usable local branch (non-empty remote).
    */
-  async clone(): Promise<boolean> {
+  clone(): Promise<boolean> {
+    return this.locked(() => this.doClone());
+  }
+
+  private async doClone(): Promise<boolean> {
     this.report(undefined, "clone");
     await git.clone({
       ...this.netOpts(),
@@ -262,7 +279,11 @@ export class GitSync {
    * First-time setup: init locally (if needed), commit everything, push.
    * Safe to call on a partially-initialised repo (retry after failure).
    */
-  async initAndPush(vaultFiles: string[]): Promise<void> {
+  initAndPush(vaultFiles: string[]): Promise<void> {
+    return this.locked(() => this.doInitAndPush(vaultFiles));
+  }
+
+  private async doInitAndPush(vaultFiles: string[]): Promise<void> {
     const alreadyInited = await this.isInitialized();
     if (!alreadyInited) {
       await git.init({ fs: this.fs, dir: this.dir, defaultBranch: DEFAULT_BRANCH });
@@ -340,7 +361,11 @@ export class GitSync {
    *   5. Detect conflicts
    *   6. Push  (skipped if conflicts or no local branch yet)
    */
-  async sync(changedFiles: string[]): Promise<SyncResult> {
+  sync(changedFiles: string[]): Promise<SyncResult> {
+    return this.locked(() => this.doSync(changedFiles));
+  }
+
+  private async doSync(changedFiles: string[]): Promise<SyncResult> {
     const conflicts: ConflictFile[] = [];
     let skippedDeletions = 0;
 
@@ -524,7 +549,11 @@ export class GitSync {
   }
 
   /** Resolve a conflict by writing resolved content, committing, and pushing */
-  async resolveConflict(filepath: string, resolvedContent: string): Promise<void> {
+  resolveConflict(filepath: string, resolvedContent: string): Promise<void> {
+    return this.locked(() => this.doResolveConflict(filepath, resolvedContent));
+  }
+
+  private async doResolveConflict(filepath: string, resolvedContent: string): Promise<void> {
     const fullPath = `${this.dir}/${filepath}`;
     await this.fs.promises.writeFile(fullPath, resolvedContent);
     await git.add({ ...this.gitOpts(), filepath });
@@ -542,7 +571,11 @@ export class GitSync {
    * Pull-only — used on vault open to get latest without pushing.
    * Uses explicit fetch + merge (not git.pull) for consistent error handling.
    */
-  async pull(): Promise<void> {
+  pull(): Promise<void> {
+    return this.locked(() => this.doPull());
+  }
+
+  private async doPull(): Promise<void> {
     await this.ensureRepoIntegrity();
     if (!(await this.hasLocalBranch())) return;
 
@@ -622,7 +655,11 @@ export class GitSync {
    *   missing locally, move the branch to the remote head, and rebuild the
    *   index — local versions of shared files always win.
    */
-  async adoptRemote(): Promise<boolean> {
+  adoptRemote(): Promise<boolean> {
+    return this.locked(() => this.doAdoptRemote());
+  }
+
+  private async doAdoptRemote(): Promise<boolean> {
     this.report(undefined, "fetch");
     const fetchHead = await this.safeFetch(this.netProgress(0, 60));
     if (!fetchHead) return false;
@@ -768,7 +805,11 @@ export class GitSync {
    * checkout the old tree in place, record it as a new commit, push.
    * The pre-restore state stays in history and can be restored back.
    */
-  async restoreCommit(oid: string): Promise<void> {
+  restoreCommit(oid: string): Promise<void> {
+    return this.locked(() => this.doRestoreCommit(oid));
+  }
+
+  private async doRestoreCommit(oid: string): Promise<void> {
     // Safety snapshot: commit the current state first, so a restore can
     // itself always be undone from the history.
     try {
@@ -787,12 +828,24 @@ export class GitSync {
       }
     } catch { /* best effort */ }
 
-    await git.checkout({
-      ...this.gitOpts(),
-      ref: oid,
-      force: true,
-      noUpdateHead: true,
-    });
+    // Restore only vault content — never .obsidian (configs and the plugin
+    // itself must not be rolled back by a notes restore).
+    const targetFiles = await git.listFiles({ ...this.gitOpts(), ref: oid });
+    const headFiles = await git
+      .listFiles({ ...this.gitOpts(), ref: DEFAULT_BRANCH })
+      .catch(() => [] as string[]);
+    const filepaths = [...new Set([...targetFiles, ...headFiles])].filter(
+      (f) => !f.startsWith(".obsidian/")
+    );
+    if (filepaths.length > 0) {
+      await git.checkout({
+        ...this.gitOpts(),
+        ref: oid,
+        force: true,
+        noUpdateHead: true,
+        filepaths,
+      });
+    }
     await git.commit({
       ...this.gitOpts(),
       message: `sync: restore ${oid.slice(0, 7)}`,
@@ -809,8 +862,8 @@ export class GitSync {
     return branches.map((b) => (b === current ? `* ${b}` : `  ${b}`)).join("\n");
   }
 
-  async checkoutRef(ref: string): Promise<void> {
-    await git.checkout({ ...this.gitOpts(), ref });
+  checkoutRef(ref: string): Promise<void> {
+    return this.locked(() => git.checkout({ ...this.gitOpts(), ref }));
   }
 
   getRemoteUrl(): string {
@@ -881,8 +934,10 @@ export class GitSync {
   }
 
   /** Bare push for the console */
-  async pushNow(): Promise<void> {
-    await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH });
+  pushNow(): Promise<void> {
+    return this.locked(async () => {
+      await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH });
+    });
   }
 
   private async readFileContent(filepath: string): Promise<string> {

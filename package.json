@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
-    "test": "esbuild src/sync/git-sync.ts --bundle --format=cjs --platform=node --outfile=test-git-sync.js --alias:obsidian=./test-obsidian-stub.js --log-level=error && node test-sync.js"
+    "test": "esbuild src/sync/git-sync.ts --bundle --format=cjs --platform=node --outfile=test-git-sync.js --alias:obsidian=./test-obsidian-stub.js --log-level=error && node test-sync.js && node test-guard.js && node test-concurrency.js"
   },
   "dependencies": {
     "isomorphic-git": "^1.25.0"

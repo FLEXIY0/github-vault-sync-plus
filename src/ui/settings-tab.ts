@@ -13,6 +13,7 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
   private termHistory: string[] = [];
   private termHistoryIdx = -1;
   private changesCache = new Map<string, FileChange[]>();
+  private commitsCache: { at: number; commits: CommitInfo[] } | null = null;
 
   private async getChanges(oid: string): Promise<FileChange[]> {
     const cached = this.changesCache.get(oid);
@@ -214,7 +215,14 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
     const section = containerEl.createDiv({ cls: "multisync-history" });
     section.createEl("h3", { text: t("history") });
 
-    const commits = await this.plugin.gitSync!.recentCommits(1000);
+    // Reuse commits loaded within the last 30s — display() re-renders often
+    let commits: CommitInfo[];
+    if (this.commitsCache && Date.now() - this.commitsCache.at < 30_000) {
+      commits = this.commitsCache.commits;
+    } else {
+      commits = await this.plugin.gitSync!.recentCommits(300);
+      this.commitsCache = { at: Date.now(), commits };
+    }
     if (commits.length === 0) {
       section.createEl("p", { text: t("historyEmpty"), cls: "setting-item-description" });
       return;
@@ -326,6 +334,7 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
         btn.disabled = true;
         try {
           await this.plugin.gitSync!.restoreCommit(c.oid);
+          this.commitsCache = null;
           this.plugin.settings.lastSyncTime = Date.now();
           await this.plugin.saveSettings();
           this.plugin.setStatus("idle");
@@ -538,7 +547,8 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
     try {
       const deviceFlow = await requestDeviceCode(clientId);
 
-      // Show the user their one-time code
+      // Show the user their one-time code (drop a stale panel from a retry)
+      this.containerEl.querySelector(".multisync-device-modal")?.remove();
       const modal = this.containerEl.createDiv({ cls: "multisync-device-modal" });
       modal.style.cssText =
         "background:var(--background-secondary);border-radius:8px;padding:16px;" +
