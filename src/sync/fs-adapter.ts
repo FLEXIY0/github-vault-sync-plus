@@ -33,13 +33,15 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
   }
 
   const promises = {
-    async readFile(path: string, options?: { encoding?: string }): Promise<Buffer | string> {
+    // Uses Uint8Array/TextDecoder instead of Node's Buffer so this works on
+    // Obsidian mobile, where there is no Node runtime.
+    async readFile(path: string, options?: { encoding?: string }): Promise<Uint8Array | string> {
       try {
         const content = await adapter.readBinary(rel(path));
         if (options?.encoding === "utf8") {
-          return Buffer.from(content).toString("utf8");
+          return new TextDecoder("utf-8").decode(content);
         }
-        return Buffer.from(content);
+        return new Uint8Array(content);
       } catch {
         const err: NodeJS.ErrnoException = new Error(`ENOENT: no such file or directory, open '${path}'`);
         err.code = "ENOENT";
@@ -47,7 +49,7 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
       }
     },
 
-    async writeFile(path: string, data: string | Buffer | Uint8Array): Promise<void> {
+    async writeFile(path: string, data: string | Uint8Array): Promise<void> {
       const relativePath = rel(path);
       // Ensure parent directory exists
       const parts = relativePath.split("/");
@@ -58,8 +60,8 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
       if (typeof data === "string") {
         await adapter.write(relativePath, data);
       } else {
-        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        await adapter.writeBinary(relativePath, buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer);
+        const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+        await adapter.writeBinary(relativePath, u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer);
       }
     },
 

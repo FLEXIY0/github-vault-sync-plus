@@ -1,6 +1,5 @@
 import esbuild from "esbuild";
 import process from "process";
-import { builtinModules } from "module";
 
 const prod = process.argv[2] === "production";
 
@@ -8,6 +7,9 @@ esbuild.build({
   banner: { js: "/* obsidian-multisync */" },
   entryPoints: ["src/main.ts"],
   bundle: true,
+  // Node builtins must NOT be external: Obsidian mobile has no Node runtime,
+  // so require("buffer") etc. would fail there. Everything gets bundled, with
+  // browser polyfills resolved from node_modules and globals shimmed below.
   external: [
     "obsidian",
     "electron",
@@ -22,8 +24,9 @@ esbuild.build({
     "@lezer/common",
     "@lezer/highlight",
     "@lezer/lr",
-    ...builtinModules,
   ],
+  platform: "browser",
+  inject: ["./shims.js"],
   format: "cjs",
   target: "es2018",
   logLevel: "info",
