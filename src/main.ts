@@ -1,5 +1,6 @@
 import { Plugin, Notice, TFile, TAbstractFile } from "obsidian";
-import { PluginSettings, DEFAULT_SETTINGS, SyncStatus, ConflictFile } from "./types";
+import { PluginSettings, DEFAULT_SETTINGS, SyncStatus, ConflictFile, SyncLogEntry } from "./types";
+import { SyncLogView, LOG_VIEW_TYPE } from "./ui/log-view";
 import { MultiSyncSettingsTab } from "./ui/settings-tab";
 import { StatusBarItem } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
@@ -25,11 +26,20 @@ export default class MultiSyncPlugin extends Plugin {
 
     this.addSettingTab(new MultiSyncSettingsTab(this.app, this));
 
-    // Keyboard command
+    // Sidebar sync log
+    this.registerView(LOG_VIEW_TYPE, (leaf) => new SyncLogView(leaf, this));
+    this.addRibbonIcon("history", t("logTitle"), () => void this.activateLogView());
+
+    // Keyboard commands
     this.addCommand({
       id: "sync-now",
       name: "Sync vault now",
       callback: () => this.triggerManualSync(),
+    });
+    this.addCommand({
+      id: "open-sync-log",
+      name: "Open sync log",
+      callback: () => void this.activateLogView(),
     });
 
     // Boot sync engine if already connected
@@ -48,9 +58,11 @@ export default class MultiSyncPlugin extends Plugin {
         try {
           await this.gitSync.pull();
           this.setStatus("idle");
-        } catch {
+          this.log("ok", t("logPull"));
+        } catch (err) {
           // Pull errors on open are non-fatal (e.g. offline) — just show error state
           this.setStatus("error", "Pull failed on open");
+          this.log("error", `${t("logPull")}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     });
@@ -107,6 +119,31 @@ export default class MultiSyncPlugin extends Plugin {
 
   setStatus(status: SyncStatus, detail?: string): void {
     this.statusBar.set(status, detail);
+  }
+
+  /** Append an entry to the persistent sync log and refresh open log views */
+  log(status: SyncLogEntry["status"], message: string): void {
+    this.settings.syncLog.push({ time: Date.now(), status, message });
+    if (this.settings.syncLog.length > 200) {
+      this.settings.syncLog.splice(0, this.settings.syncLog.length - 200);
+    }
+    void this.saveSettings();
+    for (const leaf of this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE)) {
+      if (leaf.view instanceof SyncLogView) leaf.view.refresh();
+    }
+  }
+
+  async activateLogView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE);
+    if (existing.length > 0) {
+      this.app.workspace.revealLeaf(existing[0]);
+      return;
+    }
+    const leaf = this.app.workspace.getLeftLeaf(false);
+    if (leaf) {
+      await leaf.setViewState({ type: LOG_VIEW_TYPE, active: true });
+      this.app.workspace.revealLeaf(leaf);
+    }
   }
 
   /**
@@ -196,7 +233,19 @@ export default class MultiSyncPlugin extends Plugin {
           this.saveSettings();
         }
       },
-      () => this.settings.syncIntervalMs
+      () => this.settings.syncIntervalMs,
+      (result, fileCount) => {
+        if (result.skippedDeletions) {
+          this.log("guard", `${t("logGuard")} (${result.skippedDeletions})`);
+        }
+        if (result.conflictFiles.length > 0) {
+          this.log("conflict", `${t("stConflict")}: ${result.conflictFiles.map((f) => f.path).join(", ")}`);
+        } else if (result.success) {
+          this.log("ok", `${t("logAuto")} (${fileCount})`);
+        } else {
+          this.log("error", `${t("logAuto")}: ${result.error ?? "?"}`);
+        }
+      }
     );
   }
 
@@ -233,23 +282,28 @@ export default class MultiSyncPlugin extends Plugin {
 
       if (result.skippedDeletions) {
         new Notice(`${t("deletionGuardNotice")} (${result.skippedDeletions})`, 10000);
+        this.log("guard", `${t("logGuard")} (${result.skippedDeletions})`);
       }
       if (result.conflictFiles.length > 0) {
         this.setStatus("conflict");
+        this.log("conflict", `${t("stConflict")}: ${result.conflictFiles.map((f) => f.path).join(", ")}`);
         this.showConflictModal(result.conflictFiles);
       } else if (result.success) {
         this.settings.lastSyncTime = Date.now();
         await this.saveSettings();
         this.setStatus("idle");
         new Notice(t("syncedOk"));
+        this.log("ok", t("logManual"));
       } else {
         this.setStatus("error", result.error);
         new Notice(`${t("syncError")}: ${result.error}`);
+        this.log("error", `${t("logManual")}: ${result.error ?? "?"}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.setStatus("error", msg);
       new Notice(`${t("syncFailed")}: ${msg}`);
+      this.log("error", `${t("logManual")}: ${msg}`);
     }
   }
 
@@ -286,6 +340,7 @@ export default class MultiSyncPlugin extends Plugin {
       await this.gitSync!.adoptRemote();
       await this.triggerManualSync();
       new Notice(`${t("switchedTo")}: ${username}/${repoName}`);
+      this.log("info", `${t("logSwitch")}: ${username}/${repoName}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.setStatus("error", msg);

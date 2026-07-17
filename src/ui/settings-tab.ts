@@ -339,6 +339,7 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           this.plugin.setStatus("idle");
           new Notice(t("restored"));
+          this.plugin.log("info", `${t("logRestore")}: ${c.oid.slice(0, 7)}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           new Notice(`${t("restoreFailed")}: ${msg}`);

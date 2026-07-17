@@ -11,11 +11,18 @@ export class SyncQueue {
   private gitSync: GitSync;
   private onStatus: StatusCallback;
   private getDebounceMs: () => number;
+  private onResult: ((result: SyncResult, fileCount: number) => void) | null;
 
-  constructor(gitSync: GitSync, onStatus: StatusCallback, getDebounceMs?: () => number) {
+  constructor(
+    gitSync: GitSync,
+    onStatus: StatusCallback,
+    getDebounceMs?: () => number,
+    onResult?: (result: SyncResult, fileCount: number) => void
+  ) {
     this.gitSync = gitSync;
     this.onStatus = onStatus;
     this.getDebounceMs = getDebounceMs ?? (() => SYNC_DEBOUNCE_MS);
+    this.onResult = onResult ?? null;
   }
 
   /** Enqueue a changed file path. Debounces before triggering sync. */
@@ -53,11 +60,14 @@ export class SyncQueue {
         this.onStatus("error", result.error);
       }
 
+      this.onResult?.(result, filesToSync.length);
       return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.onStatus("error", msg);
-      return { success: false, conflictFiles: [], error: msg };
+      const failed: SyncResult = { success: false, conflictFiles: [], error: msg };
+      this.onResult?.(failed, filesToSync.length);
+      return failed;
     } finally {
       this.running = false;
       // If more files arrived while we were syncing, flush again

@@ -9,6 +9,13 @@ export interface PluginSettings {
   commitMessageTemplate: string; // e.g. "sync: {{datetime}}"
   customClientId: string;        // user's own OAuth app client_id ("" = built-in app)
   language: "" | "en" | "ru";    // UI language ("" = follow Obsidian's language)
+  syncLog: SyncLogEntry[];       // recent sync events shown in the sidebar log view
+}
+
+export interface SyncLogEntry {
+  time: number;
+  status: "ok" | "error" | "conflict" | "guard" | "info";
+  message: string;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -26,6 +33,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   commitMessageTemplate: "sync: {{datetime}}",
   customClientId: "",
   language: "",
+  syncLog: [],
 };
 
 export interface DeviceFlowResponse {

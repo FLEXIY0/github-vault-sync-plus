@@ -347,3 +347,69 @@
   background: rgba(var(--color-red-rgb), 0.12);
   color: var(--color-red);
 }
+
+/* Sidebar sync log */
+
+.multisync-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.multisync-log-head h4 {
+  margin: 0;
+}
+
+.multisync-log-clear {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.multisync-log-day {
+  margin: 10px 0 4px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.multisync-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-size: var(--font-ui-small);
+}
+
+.multisync-log-row:hover {
+  background: var(--background-secondary);
+}
+
+.multisync-log-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  align-self: center;
+  background: var(--text-faint);
+}
+
+.multisync-log-row.is-ok .multisync-log-dot       { background: var(--color-green); }
+.multisync-log-row.is-error .multisync-log-dot    { background: var(--color-red); }
+.multisync-log-row.is-conflict .multisync-log-dot { background: var(--color-yellow); }
+.multisync-log-row.is-guard .multisync-log-dot    { background: var(--color-orange); }
+.multisync-log-row.is-info .multisync-log-dot     { background: var(--interactive-accent); }
+
+.multisync-log-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.multisync-log-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
