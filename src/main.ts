@@ -124,6 +124,7 @@ export default class MultiSyncPlugin extends Plugin {
     const vaultPath: string = (adapter as any).basePath ?? "";
 
     const sync = new GitSync(adapter, vaultPath, token, username, repoName);
+    sync.onProgress = (pct, phase) => this.statusBar.progress(pct, phase);
 
     const exists      = await repoExists(token, username, repoName);
     const alreadyInit = await sync.isInitialized();
@@ -179,6 +180,7 @@ export default class MultiSyncPlugin extends Plugin {
       githubUsername,
       repoName
     );
+    this.gitSync.onProgress = (pct, phase) => this.statusBar.progress(pct, phase);
 
     this.syncQueue = new SyncQueue(this.gitSync, (status, detail) => {
       this.setStatus(status, detail);

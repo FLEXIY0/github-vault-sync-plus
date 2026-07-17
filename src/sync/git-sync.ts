@@ -51,12 +51,40 @@ const gitHttp = {
   },
 };
 
+/**
+ * Reports overall sync progress to the UI.
+ * `percent` is 0–100, or undefined when progress is indeterminate.
+ */
+export type ProgressReporter = (percent: number | undefined, phase?: string) => void;
+
 export class GitSync {
   private fs: ReturnType<typeof createFsAdapter>;
   private dir: string;
   private token: string;
   private username: string;
   private remoteUrl: string;
+
+  /** Optional UI progress hook — safe to leave unset */
+  onProgress: ProgressReporter | null = null;
+
+  private report(percent: number | undefined, phase?: string): void {
+    try {
+      this.onProgress?.(percent, phase);
+    } catch {
+      /* UI errors must never break a sync */
+    }
+  }
+
+  /**
+   * Maps isomorphic-git onProgress events ({phase, loaded, total}) into the
+   * [base, base+span] slice of the overall percentage.
+   */
+  private netProgress(base: number, span: number) {
+    return ({ phase, loaded, total }: { phase: string; loaded?: number; total?: number }) => {
+      const frac = total && loaded !== undefined ? Math.min(loaded / total, 1) : 0;
+      this.report(base + frac * span, phase);
+    };
+  }
 
   constructor(
     adapter: DataAdapter,
@@ -129,12 +157,13 @@ export class GitSync {
    * Fetch from origin. Returns the FETCH_HEAD oid when remote has commits,
    * or null when the remote is empty or unreachable.
    */
-  private async safeFetch(): Promise<string | null> {
+  private async safeFetch(onProgress?: ReturnType<GitSync["netProgress"]>): Promise<string | null> {
     try {
       await git.fetch({
         ...this.netOpts(),
         ref: DEFAULT_BRANCH,
         singleBranch: true,
+        onProgress,
       });
       return await git.resolveRef({ fs: this.fs, dir: this.dir, ref: "FETCH_HEAD" });
     } catch {
@@ -147,11 +176,14 @@ export class GitSync {
    * Returns true if the clone produced a usable local branch (non-empty remote).
    */
   async clone(): Promise<boolean> {
+    this.report(undefined, "clone");
     await git.clone({
       ...this.netOpts(),
       singleBranch: true,
       depth: 1,
+      onProgress: this.netProgress(0, 95),
     });
+    this.report(100, "clone");
     return this.hasLocalBranch();
   }
 
@@ -166,12 +198,15 @@ export class GitSync {
     }
 
     // Stage all vault files (skip any that fail)
+    let staged = 0;
     for (const file of vaultFiles) {
       try {
         await git.add({ fs: this.fs, dir: this.dir, filepath: file });
       } catch {
         // Skip un-stageable files (binary, permission issues, etc.)
       }
+      staged++;
+      this.report((staged / vaultFiles.length) * 40, "stage");
     }
 
     const localBranchExists = await this.hasLocalBranch();
@@ -205,11 +240,14 @@ export class GitSync {
       url: this.remoteUrl,
     });
 
+    this.report(50, "push");
     await git.push({
       ...this.netOpts(),
       ref: DEFAULT_BRANCH,
       force: false,
+      onProgress: this.netProgress(50, 50),
     });
+    this.report(100, "push");
   }
 
   /**
@@ -228,6 +266,9 @@ export class GitSync {
 
     try {
       // ── 1. Stage ─────────────────────────────────────────────────────────────
+      // Overall progress budget: stage 0-30, commit 30-35, fetch 35-60,
+      // merge 60-70, conflict scan 70-75, push 75-100.
+      let staged = 0;
       for (const file of changedFiles) {
         try {
           await git.add({ fs: this.fs, dir: this.dir, filepath: file });
@@ -236,6 +277,8 @@ export class GitSync {
             await git.remove({ fs: this.fs, dir: this.dir, filepath: file });
           } catch { /* skip */ }
         }
+        staged++;
+        this.report((staged / changedFiles.length) * 30, "stage");
       }
 
       // ── 2. Commit if dirty ───────────────────────────────────────────────────
@@ -250,6 +293,7 @@ export class GitSync {
       }
 
       if (hasDirty) {
+        this.report(30, "commit");
         const now = new Date().toISOString().replace("T", " ").slice(0, 19);
         await git.commit({
           ...this.gitOpts(),
@@ -259,7 +303,8 @@ export class GitSync {
       }
 
       // ── 3. Fetch ─────────────────────────────────────────────────────────────
-      const fetchHead = await this.safeFetch();
+      this.report(35, "fetch");
+      const fetchHead = await this.safeFetch(this.netProgress(35, 25));
 
       // ── 4. Merge ─────────────────────────────────────────────────────────────
       if (fetchHead && (await this.hasLocalBranch())) {
@@ -270,6 +315,7 @@ export class GitSync {
         });
 
         if (fetchHead !== localHead) {
+          this.report(60, "merge");
           await git.merge({
             fs: this.fs,
             dir: this.dir,
@@ -283,6 +329,7 @@ export class GitSync {
       }
 
       // ── 5. Detect conflicts ──────────────────────────────────────────────────
+      this.report(70, "check");
       if (await this.hasLocalBranch()) {
         const statusAfter = await git.statusMatrix({ fs: this.fs, dir: this.dir });
         for (const [filepath, head, workdir, stage] of statusAfter) {
@@ -296,12 +343,15 @@ export class GitSync {
 
       // ── 6. Push ──────────────────────────────────────────────────────────────
       if (conflicts.length === 0 && (await this.hasLocalBranch())) {
+        this.report(75, "push");
         await git.push({
           ...this.netOpts(),
           ref: DEFAULT_BRANCH,
+          onProgress: this.netProgress(75, 25),
         });
       }
 
+      this.report(100, "done");
       return { success: conflicts.length === 0, conflictFiles: conflicts };
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -331,7 +381,8 @@ export class GitSync {
   async pull(): Promise<void> {
     if (!(await this.hasLocalBranch())) return;
 
-    const fetchHead = await this.safeFetch();
+    this.report(undefined, "fetch");
+    const fetchHead = await this.safeFetch(this.netProgress(0, 70));
     if (!fetchHead) return;
 
     const localHead = await git.resolveRef({
@@ -341,6 +392,7 @@ export class GitSync {
     });
 
     if (fetchHead !== localHead) {
+      this.report(80, "merge");
       await git.merge({
         fs: this.fs,
         dir: this.dir,
@@ -351,6 +403,7 @@ export class GitSync {
         fastForwardOnly: false,
       });
     }
+    this.report(100, "done");
   }
 
   private async readFileContent(filepath: string): Promise<string> {

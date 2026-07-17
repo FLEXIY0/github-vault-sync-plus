@@ -1,0 +1,55 @@
+/* Git Sync+ status bar progress */
+
+.multisync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.multisync-bar {
+  display: none;
+  position: relative;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.multisync-status.is-syncing .multisync-bar {
+  display: block;
+}
+
+.multisync-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0%;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+  transition: width 150ms ease;
+}
+
+/* Indeterminate: a short segment gliding back and forth */
+.multisync-bar.is-indeterminate .multisync-bar-fill {
+  width: 30%;
+  animation: multisync-slide 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes multisync-slide {
+  from { left: 0; }
+  to   { left: 70%; }
+}
+
+.multisync-pct {
+  display: none;
+  min-width: 3.2em;
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.multisync-status.is-syncing .multisync-pct {
+  display: inline;
+}
