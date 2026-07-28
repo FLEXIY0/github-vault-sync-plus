@@ -61,7 +61,7 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName(t("vaultRepo"))
-        .setDesc(`github.com/${settings.githubUsername}/${settings.repoName}`)
+        .setDesc(`github.com/${settings.githubUsername}/${this.plugin.activeRepoName()}`)
         .addDropdown(async (dropdown) => {
           if (settings.repoName) {
             dropdown.addOption(settings.repoName, settings.repoName);
@@ -140,6 +140,24 @@ export class MultiSyncSettingsTab extends PluginSettingTab {
 
     // ── Sync options ──────────────────────────────────────────────────────────
     containerEl.createEl("h3", { text: t("syncOptions") });
+
+    new Setting(containerEl)
+      .setName(t("mobileMode"))
+      .setDesc(t("mobileModeDesc") + this.plugin.activeRepoName())
+      .addToggle((toggle) =>
+        toggle.setValue(settings.mobileMode).onChange(async (val) => {
+          settings.mobileMode = val;
+          await this.plugin.saveSettings();
+          // The device now points at a different repo — rebuild the engine and
+          // reconcile with it (adoptRemote never deletes local files).
+          await this.plugin.bootSyncEngine();
+          try {
+            await this.plugin.gitSync?.setOrigin();
+            await this.plugin.gitSync?.adoptRemote();
+          } catch { /* first sync will retry */ }
+          this.display();
+        })
+      );
 
     new Setting(containerEl)
       .setName(t("autoSync"))

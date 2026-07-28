@@ -9,6 +9,7 @@ export interface PluginSettings {
   commitMessageTemplate: string; // e.g. "sync: {{datetime}}"
   customClientId: string;        // user's own OAuth app client_id ("" = built-in app)
   language: "" | "en" | "ru";    // UI language ("" = follow Obsidian's language)
+  mobileMode: boolean;           // sync the notes-only mirror repo instead of the full vault
   syncLog: SyncLogEntry[];       // recent sync events shown in the sidebar log view
 }
 
@@ -33,6 +34,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   commitMessageTemplate: "sync: {{datetime}}",
   customClientId: "",
   language: "",
+  mobileMode: false,
   syncLog: [],
 };
 

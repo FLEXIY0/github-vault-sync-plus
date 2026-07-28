@@ -13,6 +13,11 @@ const en = {
   connectBtn: "Connect GitHub",
   cancel: "Cancel",
   syncOptions: "Sync Options",
+  mobileMode: "This is a phone",
+  mobileModeDesc:
+    "Sync the notes-only mirror instead of the full vault. Attachments are left "
+    + "on this device: a vault with images can be tens of megabytes, and cloning "
+    + "that much crashes Obsidian on mobile. Mirror repo: ",
   autoSync: "Auto-sync",
   autoSyncDesc: "Automatically sync when files are modified.",
   debounce: "Sync debounce (ms)",
@@ -133,6 +138,11 @@ const ru: typeof en = {
   connectBtn: "Подключить GitHub",
   cancel: "Отмена",
   syncOptions: "Параметры синхронизации",
+  mobileMode: "Это телефон",
+  mobileModeDesc:
+    "Синхронизировать облегчённое зеркало вместо полного хранилища. Вложения "
+    + "остаются на этом устройстве: хранилище с картинками весит десятки мегабайт, "
+    + "и на их загрузке Obsidian на телефоне вылетает. Репозиторий зеркала: ",
   autoSync: "Автосинхронизация",
   autoSyncDesc: "Синхронизировать автоматически при изменении файлов.",
   debounce: "Задержка синка (мс)",

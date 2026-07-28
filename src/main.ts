@@ -9,6 +9,9 @@ import { SyncQueue } from "./sync/queue";
 import { repoExists, createRepo, vaultNameToRepoName } from "./github/api";
 import { t, setLang, detectLang } from "./i18n";
 
+/** Attachment types a phone must never push into the lightweight mirror */
+const ATTACHMENT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|pdf|mp4|mov|mkv|avi|mp3|wav|flac|zip|7z|rar)$/i;
+
 export default class MultiSyncPlugin extends Plugin {
   settings!: PluginSettings;
   private statusBar!: StatusBarItem;
@@ -159,9 +162,11 @@ export default class MultiSyncPlugin extends Plugin {
     // brand-new empty repo — a vault called "Obsidian Vault" resolves to
     // "obsidian-obsidian-vault", which never matches the real repo, so the
     // "repo does not exist" branch fired and created one.
-    const repoName =
+    const baseRepo =
       customRepoName || this.settings.repoName || vaultNameToRepoName(vaultName);
-    this.settings.repoName = repoName;
+    this.settings.repoName = baseRepo;
+    // On a phone every operation below targets the mirror, not the full vault.
+    const repoName = this.activeRepoName();
 
     const adapter = this.app.vault.adapter;
     // Obsidian exposes basePath on FileSystemAdapter (desktop). On mobile the vault
@@ -228,7 +233,8 @@ export default class MultiSyncPlugin extends Plugin {
   }
 
   async bootSyncEngine(): Promise<void> {
-    const { githubToken, githubUsername, repoName } = this.settings;
+    const { githubToken, githubUsername } = this.settings;
+    const repoName = this.activeRepoName();
     if (!githubToken || !githubUsername || !repoName) return;
 
     const adapter = this.app.vault.adapter;
@@ -267,6 +273,20 @@ export default class MultiSyncPlugin extends Plugin {
         }
       }
     );
+  }
+
+  /**
+   * The repo this device actually syncs with.
+   *
+   * A phone syncs "<vault-repo>-mobile": the notes without attachments. The
+   * full vault can be tens of megabytes, and Obsidian mobile buffers an entire
+   * pack in memory while cloning, which crashes it outright. `repoName` still
+   * identifies the vault on every device; only the traffic is redirected.
+   */
+  activeRepoName(): string {
+    const base = this.settings.repoName;
+    if (!base) return "";
+    return this.settings.mobileMode ? `${base}-mobile` : base;
   }
 
   /** Vault files eligible for sync */
@@ -382,6 +402,9 @@ export default class MultiSyncPlugin extends Plugin {
   }
 
   private isExcluded(filepath: string): boolean {
+    // Keeping the mirror small is the whole reason it exists — a phone never
+    // pushes attachments into it, whatever the user's patterns say.
+    if (this.settings.mobileMode && ATTACHMENT_RE.test(filepath)) return true;
     return this.settings.excludePatterns.some((pattern) => {
       // Convert simple glob pattern (supports *) to regex
       const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
