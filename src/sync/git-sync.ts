@@ -401,15 +401,13 @@ export class GitSync {
         toRemove = [];
       }
 
-      // Mass-deletion guard: a broken device (e.g. an empty phone vault) must
-      // never be able to wipe the repo. When a sync is mostly deletions, skip
-      // them and surface a warning; "force-delete" in the console bypasses.
-      if (
-        scanned &&
-        !this.allowMassDeletion &&
-        toRemove.length >= 10 &&
-        toRemove.length > toAdd.length + 5
-      ) {
+      // Deletions are never propagated by a sync. A file removed on one device
+      // stays in the repo and returns on the next pull — this is the plugin's
+      // core "nothing is ever lost" guarantee, and it makes a broken or empty
+      // device (e.g. a phone that failed to clone) structurally incapable of
+      // wiping the vault. Removing something from the repo stays a deliberate
+      // manual act: "force-delete" in the Git Console bypasses this for one run.
+      if (toRemove.length > 0 && !this.allowMassDeletion) {
         skippedDeletions = toRemove.length;
         toRemove = [];
       }
@@ -473,6 +471,7 @@ export class GitSync {
 
       // ── 4. Merge — a conflict throws MergeConflictError with the file list ──
       let merged = false;
+      let grafted = false;
       if (fetchHead && (await this.hasLocalBranch())) {
         const head = await this.resolveSafe(DEFAULT_BRANCH);
         if (fetchHead !== head) {
@@ -494,9 +493,38 @@ export class GitSync {
                 conflicts.push({ path: filepath, ours, theirs });
               }
             } else {
-              throw err;
+              // The histories cannot be merged at all — typically unrelated
+              // roots left behind by a failed first-time setup. Previously this
+              // threw, which made every future sync fail at the same point and
+              // left the device permanently unable to push. Adopt the remote
+              // history instead and re-record our files on top of it.
+              await this.graftRemote(fetchHead);
+              grafted = true;
             }
           }
+        }
+      }
+
+      // ── 4b. Re-commit the working tree after a graft ────────────────────────
+      // graftRemote discards the index, so local files must be staged again to
+      // land on top of the adopted history. Deletions are never staged here.
+      if (grafted) {
+        this.report(65, "commit");
+        const matrix = await git.statusMatrix(this.gitOpts());
+        const restage = matrix
+          .filter(([, head, workdir, stage]) => !(head === 1 && workdir === 1 && stage === 1))
+          .filter(([, , workdir]) => workdir !== 0)
+          .map(([filepath]) => filepath as string);
+        if (restage.length > 0) {
+          try {
+            await git.add({ ...this.gitOpts(), filepath: restage });
+          } catch {
+            for (const file of restage) {
+              try { await git.add({ ...this.gitOpts(), filepath: file }); } catch { /* skip */ }
+            }
+          }
+          const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+          await git.commit({ ...this.gitOpts(), message: `sync: ${now}` });
         }
       }
 
@@ -683,6 +711,23 @@ export class GitSync {
       }
     }
 
+    await this.graftRemote(fetchHead);
+    this.report(100, "done");
+    return true;
+  }
+
+  /**
+   * Last-resort reconciliation when histories cannot be merged (unrelated
+   * roots, or a merge that fails outright): take the remote history as the
+   * base, write every remote file that is missing on disk, and move the local
+   * branch onto the remote head.
+   *
+   * Nothing is ever deleted or overwritten: local versions of files that exist
+   * on both sides stay untouched on disk, so the very next commit re-records
+   * them on top of the adopted history. This is what makes a device with a
+   * broken local repo recoverable without losing a single note.
+   */
+  private async graftRemote(fetchHead: string): Promise<void> {
     this.report(70, "adopt");
     const remoteFiles = await git.listFiles({ ...this.gitOpts(), ref: fetchHead });
     for (const filepath of remoteFiles) {
@@ -704,8 +749,36 @@ export class GitSync {
     });
     // Rebuild the index from scratch against the adopted head
     try { await this.fs.promises.unlink(`${this.dir}/.git/index`); } catch { /* rebuilt lazily */ }
-    this.report(100, "done");
-    return true;
+  }
+
+  /**
+   * True when the remote branch has at least one commit. Distinguishes "the
+   * repo is empty, we should push our vault into it" from "the repo has
+   * history we failed to download" — the two must never be confused, because
+   * treating the second as the first creates an orphan history that can only
+   * ever be pushed by force.
+   */
+  async remoteHasCommits(): Promise<boolean> {
+    try {
+      const resp = await requestUrl({
+        url: `${GITHUB_API_BASE}/repos/${this.username}/${this.repoName}/branches`,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/vnd.github+json",
+        },
+        throw: false,
+      });
+      // A repo with no commits answers 200 with an empty list (or 409 "Git
+      // Repository is empty"). Anything else is not a reliable "it's empty".
+      if (resp.status === 409) return false;
+      if (resp.status !== 200) return true;
+      return (resp.json as unknown[]).length > 0;
+    } catch {
+      // Unknown (offline, auth failure) — assume it does, so callers take the
+      // safe branch and refuse to create a competing history.
+      return true;
+    }
   }
 
   /** Recent commits on main, newest first (for the heatmap / console) */
@@ -899,13 +972,18 @@ export class GitSync {
       url: this.remoteUrl,
     });
 
-    // Force-push current branch to the new remote
+    // Reconcile with whatever the new remote already contains, then push
+    // normally. This used to be a force-push, which meant that pointing a
+    // device at an existing repo could replace its entire history with the
+    // local branch — on a device whose local repo was broken or freshly
+    // initialised, that silently destroyed every note in the repo.
     if (await this.hasLocalBranch()) {
+      await this.adoptRemote();
       this.report(50, "push");
       await git.push({
         ...this.netOpts(),
         ref: DEFAULT_BRANCH,
-        force: true,
+        force: false,
         onProgress: this.netProgress(50, 50),
       });
       this.report(100, "push");

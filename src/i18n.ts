@@ -69,7 +69,7 @@ const en = {
     "checkout <ref>    switch to branch/commit\n" +
     "restore <sha>     restore vault to commit\n" +
     "sync | pull | push\n" +
-    "force-delete      sync including mass deletions\n" +
+    "force-delete      sync this run including deletions\n" +
     "remote            show remote URL\n" +
     "clear             clear output",
   branches: "Branches",
@@ -98,14 +98,14 @@ const en = {
   switchBtn: "Switch",
   switchedTo: "Switched to",
   switchFailed: "Switch failed",
-  deletionGuardNotice: "Mass-deletion guard: file deletions were NOT synced. If intentional, run force-delete in the Git Console.",
+  deletionGuardNotice: "Deletions are not synced: removed files stay in the repo. If you really want them gone, run force-delete in the Git Console.",
   logTitle: "Sync Log",
   clearLog: "Clear",
   logEmpty: "No sync events yet.",
   logAuto: "Auto-sync",
   logManual: "Manual sync",
   logPull: "Pull on open",
-  logGuard: "Deletions skipped by guard",
+  logGuard: "Deletions not synced",
   logRestore: "Restored to commit",
   logSwitch: "Switched repo",
   // status bar
@@ -189,7 +189,7 @@ const ru: typeof en = {
     "checkout <ref>    переключиться на ветку/коммит\n" +
     "restore <sha>     восстановить хранилище к коммиту\n" +
     "sync | pull | push\n" +
-    "force-delete      синк вместе с массовыми удалениями\n" +
+    "force-delete      синк этого раза вместе с удалениями\n" +
     "remote            показать адрес репозитория\n" +
     "clear             очистить вывод",
   branches: "Ветки",
@@ -218,14 +218,14 @@ const ru: typeof en = {
   switchBtn: "Переключить",
   switchedTo: "Переключено на",
   switchFailed: "Не удалось переключить",
-  deletionGuardNotice: "Защита от массового удаления: удаления файлов НЕ синхронизированы. Если это намеренно — выполните force-delete в Git-консоли.",
+  deletionGuardNotice: "Удаления не синхронизируются: удалённые файлы остаются в репозитории. Если нужно удалить их и там — выполните force-delete в Git-консоли.",
   logTitle: "Логи синхронизации",
   clearLog: "Очистить",
   logEmpty: "Событий синхронизации пока нет.",
   logAuto: "Автосинк",
   logManual: "Ручной синк",
   logPull: "Pull при открытии",
-  logGuard: "Удаления пропущены защитой",
+  logGuard: "Удаления не синхронизированы",
   logRestore: "Восстановлено к коммиту",
   logSwitch: "Смена репозитория",
   stSyncing: "Синк",

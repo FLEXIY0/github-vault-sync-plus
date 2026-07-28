@@ -154,7 +154,13 @@ export default class MultiSyncPlugin extends Plugin {
     this.setStatus("connecting");
 
     const vaultName = this.app.vault.getName();
-    const repoName  = customRepoName || vaultNameToRepoName(vaultName);
+    // The repo this vault is already bound to always wins. Re-deriving the name
+    // from the vault title on every connect is what made reconnecting create a
+    // brand-new empty repo — a vault called "Obsidian Vault" resolves to
+    // "obsidian-obsidian-vault", which never matches the real repo, so the
+    // "repo does not exist" branch fired and created one.
+    const repoName =
+      customRepoName || this.settings.repoName || vaultNameToRepoName(vaultName);
     this.settings.repoName = repoName;
 
     const adapter = this.app.vault.adapter;
@@ -185,19 +191,33 @@ export default class MultiSyncPlugin extends Plugin {
       }
     } else if (!alreadyInit) {
       // Repo exists remotely, this is a new device — clone it.
-      // clone() returns false when the remote is empty (a previous initAndPush
-      // created the repo but never pushed any commits). In that case fall back
-      // to initAndPush so we establish the local branch and push.
       const cloneHadCommits = await sync.clone();
-      if (!cloneHadCommits) {
+      if (cloneHadCommits) {
+        new Notice(`${t("clonedRepo")}: ${username}/${repoName}`);
+      } else if (await sync.remoteHasCommits()) {
+        // The clone produced no local branch even though the repo HAS history.
+        // Falling back to initAndPush here (the old behaviour) started a fresh
+        // orphan history containing only this device's files, which can never
+        // fast-forward onto the real one — every later push was rejected, and
+        // a force-push would have wiped the repo. Stop instead: the vault and
+        // the repo are both intact, and a retry can still succeed.
+        throw new Error(
+          `Could not download ${username}/${repoName}, which already has history. ` +
+          `Nothing was changed — check your connection and try connecting again.`
+        );
+      } else {
+        // Remote is genuinely empty (repo created earlier but never pushed to)
+        // — establishing the first history here is correct.
         await sync.initAndPush(allFiles());
         new Notice(`${t("initialisedRepo")}: ${username}/${repoName}`);
-      } else {
-        new Notice(`${t("clonedRepo")}: ${username}/${repoName}`);
       }
     } else {
-      // Already initialised locally — update remote URL if changed, then reconnect.
-      await sync.updateRemote();
+      // Already initialised locally — point at the repo and reconcile with it.
+      // adoptRemote unions both sides (local versions win, nothing is deleted),
+      // so a device whose local history diverged still recovers instead of
+      // being stuck on rejected pushes.
+      await sync.setOrigin();
+      await sync.adoptRemote();
       new Notice(`${t("reconnected")}: ${username}/${repoName}`);
     }
 
