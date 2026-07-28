@@ -67,10 +67,26 @@ async function commitCount(dir) {
   });
   assert(new TextDecoder().decode(blob).includes("v2"), "commit contains new content");
 
-  // 4. Delete a file
+  // 4. Delete a file — deletions are never propagated by a sync
   await nfs.unlink(path.join(root, "b.md"));
   r = await sync.sync(["b.md"]);
-  assert((await commitCount(root)) === 3, "deletion committed");
+  assert((await commitCount(root)) === 2, "deletion created no commit");
+  assert(r.skippedDeletions === 1, "deletion reported as skipped");
+  let stillThere = true;
+  try {
+    await git.readBlob({
+      fs: fssync, dir: root,
+      oid: await git.resolveRef({ fs: fssync, dir: root, ref: "main" }),
+      filepath: "b.md",
+    });
+  } catch { stillThere = false; }
+  assert(stillThere, "deleted file kept in tree");
+
+  // 5. force-delete opts in to propagating deletions for one run
+  sync.allowMassDeletion = true;
+  r = await sync.sync(["b.md"]);
+  sync.allowMassDeletion = false;
+  assert((await commitCount(root)) === 3, "force-delete committed the deletion");
   let gone = false;
   try {
     await git.readBlob({
@@ -79,7 +95,7 @@ async function commitCount(dir) {
       filepath: "b.md",
     });
   } catch { gone = true; }
-  assert(gone, "deleted file removed from tree");
+  assert(gone, "force-delete removed file from tree");
 
   console.log("ALL SMOKE TESTS PASSED");
 })().catch((e) => { console.error("FAIL:", e); process.exit(1); });
