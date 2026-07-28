@@ -151,6 +151,19 @@ export class GitSync {
     };
   }
 
+  /**
+   * Path of a vault-relative file for the plugin's OWN fs calls.
+   *
+   * On desktop `dir` is the vault's basePath. On mobile Obsidian exposes no
+   * basePath, so `dir` is "" and naive `${this.dir}/${p}` interpolation yields
+   * a leading slash ("/.git/HEAD"). isomorphic-git's internal calls never
+   * produce that shape, so the very same file ends up addressed by two
+   * different strings and the plugin's own reads miss what the library wrote.
+   */
+  private abs(filepath: string): string {
+    return this.dir ? `${this.dir}/${filepath}` : filepath;
+  }
+
   /** resolveRef that returns null instead of throwing */
   private async resolveSafe(ref: string): Promise<string | null> {
     try {
@@ -582,7 +595,7 @@ export class GitSync {
   }
 
   private async doResolveConflict(filepath: string, resolvedContent: string): Promise<void> {
-    const fullPath = `${this.dir}/${filepath}`;
+    const fullPath = this.abs(filepath);
     await this.fs.promises.writeFile(fullPath, resolvedContent);
     await git.add({ ...this.gitOpts(), filepath });
     await git.commit({
@@ -640,11 +653,11 @@ export class GitSync {
   private async ensureRepoIntegrity(): Promise<void> {
     try {
       const head = await this.fs.promises
-        .readFile(`${this.dir}/.git/HEAD`, { encoding: "utf8" })
+        .readFile(this.abs(".git/HEAD"), { encoding: "utf8" })
         .catch(() => "");
       if (!(head as string).trim()) {
         await this.fs.promises.writeFile(
-          `${this.dir}/.git/HEAD`,
+          this.abs(".git/HEAD"),
           `ref: refs/heads/${DEFAULT_BRANCH}\n`
         );
       }
@@ -732,12 +745,12 @@ export class GitSync {
     const remoteFiles = await git.listFiles({ ...this.gitOpts(), ref: fetchHead });
     for (const filepath of remoteFiles) {
       const existsLocally = await this.fs.promises
-        .stat(`${this.dir}/${filepath}`)
+        .stat(this.abs(filepath))
         .then(() => true, () => false);
       if (existsLocally) continue;
       try {
         const { blob } = await git.readBlob({ ...this.gitOpts(), oid: fetchHead, filepath });
-        await this.fs.promises.writeFile(`${this.dir}/${filepath}`, blob);
+        await this.fs.promises.writeFile(this.abs(filepath), blob);
       } catch { /* skip unreadable entries */ }
     }
     await git.writeRef({
@@ -748,7 +761,7 @@ export class GitSync {
       force: true,
     });
     // Rebuild the index from scratch against the adopted head
-    try { await this.fs.promises.unlink(`${this.dir}/.git/index`); } catch { /* rebuilt lazily */ }
+    try { await this.fs.promises.unlink(this.abs(".git/index")); } catch { /* rebuilt lazily */ }
   }
 
   /**
@@ -1021,7 +1034,7 @@ export class GitSync {
   private async readFileContent(filepath: string): Promise<string> {
     try {
       const buf = await this.fs.promises.readFile(
-        `${this.dir}/${filepath}`,
+        this.abs(filepath),
         { encoding: "utf8" }
       );
       return buf as string;

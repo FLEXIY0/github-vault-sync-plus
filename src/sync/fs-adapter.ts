@@ -35,6 +35,13 @@ export function createFsAdapter(adapter: DataAdapter, vaultPath: string) {
     if (base && normalized.startsWith(base + "/")) {
       return normalized.slice(base.length + 1);
     }
+    // Mobile: Obsidian exposes no basePath, so `base` is empty and callers may
+    // hand us either "notes/a.md" (isomorphic-git) or "/notes/a.md" (a plain
+    // `${dir}/${path}` join). Both must resolve to the same adapter path, or
+    // the plugin cannot read back what the library just wrote.
+    if (!base && normalized.startsWith("/")) {
+      return normalized.slice(1);
+    }
     return normalized;
   }
 
