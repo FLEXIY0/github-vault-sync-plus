@@ -13,6 +13,10 @@ const en = {
   connectBtn: "Connect GitHub",
   cancel: "Cancel",
   syncOptions: "Sync Options",
+  tooBigForMobile:
+    "This vault is {{size}} MB — too large to clone on a phone, which would run "
+    + "out of memory. Turn on \"This is a phone\" above to sync the notes-only "
+    + "mirror instead.",
   mobileMode: "This is a phone",
   mobileModeDesc:
     "Sync the notes-only mirror instead of the full vault. Attachments are left "
@@ -138,6 +142,10 @@ const ru: typeof en = {
   connectBtn: "Подключить GitHub",
   cancel: "Отмена",
   syncOptions: "Параметры синхронизации",
+  tooBigForMobile:
+    "Хранилище весит {{size}} МБ — слишком много, чтобы скачать его на телефон: "
+    + "не хватит памяти. Включите выше «Это телефон», чтобы синхронизировать "
+    + "облегчённое зеркало только с заметками.",
   mobileMode: "Это телефон",
   mobileModeDesc:
     "Синхронизировать облегчённое зеркало вместо полного хранилища. Вложения "

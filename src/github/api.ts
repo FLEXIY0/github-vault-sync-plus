@@ -80,3 +80,26 @@ export function vaultNameToRepoName(vaultName: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")}`;
 }
+
+/**
+ * Repo size in MB as GitHub reports it, or null when unknown.
+ * Used to refuse a clone that would kill the app rather than fail.
+ */
+export async function repoSizeMb(
+  token: string,
+  username: string,
+  repoName: string
+): Promise<number | null> {
+  const response = await requestUrl({
+    url: `${GITHUB_API_BASE}/repos/${username}/${repoName}`,
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+    },
+    throw: false,
+  });
+  if (response.status !== 200) return null;
+  const size = (response.json as { size?: number }).size;
+  return typeof size === "number" ? size / 1024 : null;
+}

@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, TAbstractFile } from "obsidian";
+import { Plugin, Notice, TFile, TAbstractFile, Platform } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS, SyncStatus, ConflictFile, SyncLogEntry } from "./types";
 import { SyncLogView, LOG_VIEW_TYPE } from "./ui/log-view";
 import { MultiSyncSettingsTab } from "./ui/settings-tab";
@@ -6,7 +6,7 @@ import { StatusBarItem } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
 import { GitSync } from "./sync/git-sync";
 import { SyncQueue } from "./sync/queue";
-import { repoExists, createRepo, vaultNameToRepoName } from "./github/api";
+import { repoExists, createRepo, repoSizeMb, vaultNameToRepoName } from "./github/api";
 import { t, setLang, detectLang } from "./i18n";
 
 /** Attachment types a phone must never push into the lightweight mirror */
@@ -195,6 +195,16 @@ export default class MultiSyncPlugin extends Plugin {
         new Notice(`${t("createdRepo")}: ${username}/${repoName}`);
       }
     } else if (!alreadyInit) {
+      // A phone cannot clone a large vault. Obsidian buffers an entire pack in
+      // one allocation, and Android kills the app on it — an OutOfMemoryError,
+      // not a catchable failure. Refuse up front with advice instead.
+      if (Platform.isMobileApp && !this.settings.mobileMode) {
+        const sizeMb = await repoSizeMb(token, username, repoName);
+        if (sizeMb !== null && sizeMb > 40) {
+          throw new Error(t("tooBigForMobile").replace("{{size}}", sizeMb.toFixed(0)));
+        }
+      }
+
       // Repo exists remotely, this is a new device — clone it.
       const cloneHadCommits = await sync.clone();
       if (cloneHadCommits) {
