@@ -164,6 +164,26 @@ export class GitSync {
     return this.dir ? `${this.dir}/${filepath}` : filepath;
   }
 
+  /**
+   * True when `head` already contains `oid` in its ancestry.
+   *
+   * Knowing about a commit is not the same as having merged it: after an
+   * interrupted or failed merge, refs/remotes/origin/main can sit at the remote
+   * head while the local branch is still behind it. Treating those as "up to
+   * date" skipped the merge and sent a push that the server could only reject
+   * as a non-fast-forward — on every subsequent sync, forever.
+   */
+  private async branchContains(head: string | null, oid: string): Promise<boolean> {
+    if (!head) return false;
+    if (head === oid) return true;
+    try {
+      return await git.isDescendent({ ...this.gitOpts(), oid: head, ancestor: oid, depth: -1 });
+    } catch {
+      // Unknown commit (never fetched) — definitely not contained
+      return false;
+    }
+  }
+
   /** resolveRef that returns null instead of throwing */
   private async resolveSafe(ref: string): Promise<string | null> {
     try {
@@ -475,11 +495,13 @@ export class GitSync {
       const originMain = await this.resolveSafe(`refs/remotes/origin/${DEFAULT_BRANCH}`);
 
       let fetchHead: string | null = null;
-      if (remoteSha && (remoteSha === localHead || remoteSha === originMain)) {
-        // Remote head is something we already have — no fetch, no merge needed
+      if (remoteSha && (await this.branchContains(localHead, remoteSha))) {
+        // Our branch already contains the remote head — nothing to fetch or merge
         this.report(70, "up to date");
       } else {
-        fetchHead = await this.safeFetch(this.netProgress(35, 25));
+        // Reuse an already-fetched remote commit when we have one, so a failed
+        // merge can be retried offline.
+        fetchHead = await this.safeFetch(this.netProgress(35, 25)) ?? originMain;
       }
 
       // ── 4. Merge — a conflict throws MergeConflictError with the file list ──
@@ -561,13 +583,9 @@ export class GitSync {
           // Nothing new locally and remote is identical — skip the roundtrip
         } else {
           this.report(75, "push");
-          await git.push({
-            ...this.netOpts(),
-            ref: DEFAULT_BRANCH,
-            onProgress: this.netProgress(75, 25),
-          });
+          await this.pushWithRecovery(this.netProgress(75, 25));
           // Remote now points at our head; remember it and drop the stale ETag
-          this.lastRemoteSha = headAfter;
+          this.lastRemoteSha = await this.resolveSafe(DEFAULT_BRANCH);
           this.branchEtag = null;
         }
       }
@@ -602,10 +620,7 @@ export class GitSync {
       ...this.gitOpts(),
       message: `sync: resolve conflict in ${filepath}`,
     });
-    await git.push({
-      ...this.netOpts(),
-      ref: DEFAULT_BRANCH,
-    });
+    await this.pushWithRecovery();
   }
 
   /**
@@ -794,6 +809,63 @@ export class GitSync {
     }
   }
 
+  /**
+   * Push, and if the server rejects it as a non-fast-forward, take in whatever
+   * the remote gained and push again.
+   *
+   * A rejection means another device pushed first. That is a normal race, not
+   * an error the user should have to resolve: the previous behaviour surfaced
+   * "Push rejected because it was not a simple fast-forward" and stopped, and
+   * because nothing reconciled the histories the next sync failed identically.
+   * Recovery merges, or grafts when the histories are unrelated — never a force
+   * push, which would discard the other device's work.
+   */
+  private async pushWithRecovery(onProgress?: ReturnType<GitSync["netProgress"]>): Promise<void> {
+    try {
+      await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH, force: false, onProgress });
+      return;
+    } catch (err) {
+      if (!(err instanceof git.Errors.PushRejectedError)) throw err;
+    }
+
+    this.report(80, "reconcile");
+    const fetchHead = await this.safeFetch();
+    if (fetchHead) {
+      const head = await this.resolveSafe(DEFAULT_BRANCH);
+      if (fetchHead !== head) {
+        try {
+          await git.merge({
+            ...this.gitOpts(),
+            ours: DEFAULT_BRANCH,
+            theirs: fetchHead,
+            message: "sync: merge remote changes",
+            fastForwardOnly: false,
+          });
+        } catch {
+          await this.graftRemote(fetchHead);
+          const matrix = await git.statusMatrix(this.gitOpts());
+          const restage = matrix
+            .filter(([, h, w, s]) => !(h === 1 && w === 1 && s === 1))
+            .filter(([, , w]) => w !== 0)
+            .map(([filepath]) => filepath as string);
+          if (restage.length > 0) {
+            try {
+              await git.add({ ...this.gitOpts(), filepath: restage });
+            } catch {
+              for (const f of restage) {
+                try { await git.add({ ...this.gitOpts(), filepath: f }); } catch { /* skip */ }
+              }
+            }
+            const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+            await git.commit({ ...this.gitOpts(), message: `sync: ${now}` });
+          }
+        }
+      }
+    }
+
+    await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH, force: false, onProgress });
+  }
+
   /** Recent commits on main, newest first (for the heatmap / console) */
   async recentCommits(depth = 500): Promise<CommitInfo[]> {
     try {
@@ -936,7 +1008,7 @@ export class GitSync {
       ...this.gitOpts(),
       message: `sync: restore ${oid.slice(0, 7)}`,
     });
-    await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH });
+    await this.pushWithRecovery();
   }
 
   /** "* main\n  feature-x" style branch listing */
@@ -993,12 +1065,7 @@ export class GitSync {
     if (await this.hasLocalBranch()) {
       await this.adoptRemote();
       this.report(50, "push");
-      await git.push({
-        ...this.netOpts(),
-        ref: DEFAULT_BRANCH,
-        force: false,
-        onProgress: this.netProgress(50, 50),
-      });
+      await this.pushWithRecovery(this.netProgress(50, 50));
       this.report(100, "push");
     }
 
@@ -1027,7 +1094,7 @@ export class GitSync {
   /** Bare push for the console */
   pushNow(): Promise<void> {
     return this.locked(async () => {
-      await git.push({ ...this.netOpts(), ref: DEFAULT_BRANCH });
+      await this.pushWithRecovery();
     });
   }
 
